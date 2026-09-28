@@ -6,9 +6,9 @@
 
 Submission pipeline tooling for teams that build benchmark tasks for AI coding
 agents: schema-checked task bundles, review lint rules, a canonical content
-hash, a content-addressed dedupe cache and a shared collision ledger with a
-review state machine and a hash-chained audit log. Build locks and review
-gates are on the roadmap.
+hash, a content-addressed dedupe cache, near-duplicate detection with MinHash
+and LSH, and a shared collision ledger with a review state machine and a
+hash-chained audit log. Build locks and review gates are on the roadmap.
 
 A benchmark task is a small bundle: an instruction, a pinned environment image,
 a reference solution and a byte-exact grader. When dozens of people author
@@ -26,6 +26,7 @@ catches those before a reviewer ever sees the task.
 | `taskledger lint PATH...` | Rule registry with stable codes, per-rule severity and fix hints, ruff-style `--select`/`--ignore` by code or prefix (also from `[lint]` in `task.toml`), inline `taskledger: ignore[TL004]` suppression, text, JSON or SARIF 2.1.0 output with line and column. |
 | `taskledger rules` | Lists the registered rules (`--json` for machines). |
 | `taskledger hash PATH` | Canonical Merkle-style sha256 of a bundle: cosmetic edits (line endings, manifest formatting, author metadata, OS clutter) never change it, any semantic edit always does. This is the identity for exact-duplicate detection. |
+| `taskledger similar PATH...` | Near-duplicate pairs among bundles: pure-Python seeded MinHash over instruction word shingles and normalized solution tokens (identifiers renamed, comments and layout dropped), an LSH index whose bands and rows are chosen from `--threshold`, and both similarities per pair. Exit 1 if any pair is found. `--json` for machines. |
 | `taskledger cache put\|get\|has\|gc` | Content-addressed object store (dedupe cache): `objects/ab/cdef...` fan-out, atomic temp-file + `os.replace` writes, verify-on-read, size-bounded LRU garbage collection. A bundle is stored file by file under its canonical digests, so an identical or cosmetically different bundle writes nothing. |
 | `taskledger ledger init\|register\|revise\|status\|transition\|history\|verify` | Shared ledger on SQLAlchemy 2.0 with an Alembic baseline (SQLite by default; another URL via `--db` or `TASKLEDGER_DATABASE_URL`, with `psycopg` from the optional `postgres` extra for Postgres, which the tests do not exercise yet): exact collisions by canonical hash enforced by a unique constraint, ID collisions with case and separator folding, a review state machine with typed errors, and an append-only, hash-chained audit log with `verify`. |
 
@@ -195,9 +196,14 @@ TL006 scans every text file line by line (files above the 4 MiB content cache
 are streamed, so size never hides a key) and never prints the credential: a
 known format keeps only its public prefix (`ghp_[redacted, 40 chars]`), a
 generic secret only its length. The entropy check only looks at values
-assigned to secret-looking names (`api_key`, `"token":`, `DB_PASSWORD=`), so
-sha256 digests and base64 fixtures do not trip it, and placeholders such as
-`changeme`, `${TOKEN}` or `<token>` are skipped. TL005 limits come from
+assigned to secret-looking names (`api_key`, `"token":`, `DB_PASSWORD=`,
+`os.environ["API_KEY"] =`, `--api-key=`), so sha256 digests and base64
+fixtures do not trip it, and placeholders such as `changeme`, `${TOKEN}`,
+`$TOKEN` or `<token>` are skipped. Passwords in URLs are caught with or
+without a username (`redis://:pw@host`), but a `@` after `?` or `#` (a query
+string) is not a password. Both scans are linear in the line length: a 200,000
+character DNA, hex or base64 line scans in well under a second
+(`tests/test_lint_rule_tl006.py`). TL005 limits come from
 `[lint]` in `task.toml`:
 
 ```toml
@@ -290,6 +296,60 @@ bytes no longer match its key is deleted and reported (exit 1). `get` and a
 repeated `put` refresh an object's modification time, and `gc` deletes the
 least recently used objects until the store fits the budget, plus temp files
 older than an hour left by crashed writers.
+
+### Near-duplicates
+
+`taskledger similar` catches resubmissions that the canonical hash cannot:
+a reworded instruction or a solution with renamed variables and new comments.
+Run from a directory holding copies of the two sample bundles, where
+`resubmitted-solver` is a copy of `integer-linear-system` whose
+instruction was rewritten by hand and whose `solve.py` had every local
+identifier renamed and comments and blank lines added (the `disguise` helper
+in `tests/paraphrase_corpus.py`):
+
+```console
+$ taskledger similar bundles/integer-linear-system bundles/modular-inverse-table
+No near-duplicates among 2 bundle(s) at threshold 0.5.
+$ taskledger similar bundles/integer-linear-system bundles/modular-inverse-table bundles/resubmitted-solver
+near-dup  1.00  bundles/integer-linear-system  bundles/resubmitted-solver  (instruction 0.06, solution 1.00)
+$ echo $?
+1
+$ taskledger similar --json bundles/integer-linear-system bundles/resubmitted-solver
+{
+  "threshold": 0.5,
+  "bands": 25,
+  "rows": 5,
+  "pairs": [
+    {
+      "a": "bundles/integer-linear-system",
+      "b": "bundles/resubmitted-solver",
+      "similarity": 1.0,
+      "instruction_similarity": 0.0625,
+      "solution_similarity": 1.0
+    }
+  ]
+}
+```
+
+How it works (`src/taskledger/neardup/`):
+
+- **Shingles.** Instructions become lower-cased word 3-grams. Solutions are
+  tokenized with Python's `tokenize` (regex fallback for other languages):
+  comments, docstrings and layout are dropped, string literals become `STR`,
+  and every identifier that is not a keyword or builtin becomes `ID0`,
+  `ID1`, ... in order of first use; then token 5-grams.
+- **MinHash.** 128 universal hash functions `(a*x + b) mod (2**61 - 1)` with
+  coefficients derived from a seed via BLAKE2b, so signatures are identical
+  across processes, machines and `PYTHONHASHSEED`.
+- **LSH.** Bands and rows minimize the false positive plus false negative
+  area under the S-curve `1 - (1 - s**r)**b` for the threshold (25 bands of 5
+  rows at 0.5). Candidates are confirmed with the signature estimate, and a
+  pair is reported when either the instruction or the solution similarity
+  reaches the threshold.
+
+The library is also usable directly (`NearDupIndex`, `fingerprint_bundle`).
+Persisting signatures in the ledger and a combined `taskledger ledger check`
+are on the roadmap.
 
 ### Ledger
 
@@ -442,13 +502,15 @@ that last updated this table (macOS arm64, Python 3.12, Docker 29).
 
 | Metric | Value | Reproduce with |
 | --- | --- | --- |
-| Tests | 655 passed | `uv run pytest -q` |
-| Branch coverage | 98.34% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
+| Tests | 706 passed | `uv run pytest -q` |
+| Branch coverage | 98.45% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
 | Lint rules registered | 7 (TL000-TL006) | `uv run taskledger rules` |
 | Findings on the flawed example | 7 (5 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
 | Findings on the two sample bundles | 0 | `uv run taskledger lint examples/bundles/*` |
 | SARIF problems in the flawed example's log | 0 (`[]`; 7 results, 7 rules) | `uv run taskledger lint -f sarif examples/flawed/digit-sum-report \| uv run python -c "import json, sys; from taskledger.lint import sarif_problems; print(sarif_problems(json.load(sys.stdin)))"` |
 | GitHub code scanning upload of the sample bundles' SARIF (CI `sarif` job) | processed: tool `taskledger`, 7 rules, 0 results, no errors or warnings | `gh api repos/vipul21435/taskledger/code-scanning/analyses --jq '.[0] \| {tool: .tool.name, rules_count, results_count, error, warning}'` |
+| Near-duplicate recall and precision on the original paraphrase corpus (12 tasks indexed, 24 paraphrased resubmissions queried: reworded instruction plus renamed, commented or extended solution) | 24 of 24 found, 0 false matches (precision 1.0, recall 1.0) at threshold 0.5 | `uv run pytest -q tests/test_neardup.py -k precision_and_recall` |
+| Word 3-gram Jaccard of each hand-written instruction paraphrase with its original | 0.12 to 0.48 (below 0.5, so on this corpus the solution signature does the catching) | `uv run python -c "import sys; sys.path.insert(0, 'tests'); from paraphrase_corpus import TASKS; from taskledger.neardup import jaccard, word_shingles; s = [jaccard(word_shingles(t.instruction), word_shingles(t.paraphrase)) for t in TASKS]; print(f'{min(s):.2f} {max(s):.2f}')"` |
 | Objects written when the same bundle is cached twice | 9 of 9, then 0 of 9 | `taskledger cache put examples/bundles/modular-inverse-table` (twice) |
 | Objects written for a copy with one edited file | 2 of 9 (the file and a new tree) | `make demo`, step 9 |
 | Audit chain after the demo's review walk | ok, 4 entries | `make demo`, step 11 |
@@ -491,6 +553,10 @@ reference output with one extra line.
 - **Cache keys are the canonical digests.** Cached bundle entries are the
   LF-normalized text and canonical manifest, so a key is always
   `sha256(object bytes)` and verify-on-read needs no side table.
+- **Near-duplicates match on either signature.** A reworded instruction over
+  the same solution and a new instruction around a renamed copy of an old
+  solution are both resubmissions, so each is scored on its own and reported
+  separately; LSH only proposes candidates and the MinHash estimate decides.
 - **Stable rule codes plus ruff-style selection.** Layers apply in order
   (`task.toml`, then CLI); the more specific selector wins and `ignore` wins a
   tie, so `--select TL004` on the command line re-enables a rule a bundle
@@ -550,8 +616,12 @@ Not built yet; tracked slice by slice in [PLAN.md](PLAN.md).
   (the baseline creates Postgres triggers for the audit log, but only SQLite
   is exercised by the tests today) and a multiprocessing registration race
   test (slice 5).
-- **Near-duplicate detection:** pure-Python MinHash + LSH over instruction
-  shingles and normalized solution tokens.
+- **Near-duplicate follow-ups (rest of slice 4):** persist signatures and LSH
+  band buckets in the ledger so candidate lookup is a query, and
+  `taskledger ledger check PATH` reporting exact, near-duplicate and ID
+  collisions together, refusing registration above the threshold unless
+  `--allow-near-dup` is given (recorded in the audit log). Instruction-only
+  paraphrase detection is weak today (see Measured numbers).
 - **Build locks:** `fcntl` file locks, DB leases with fencing tokens and stale
   recovery, and a build cache so each environment is built once.
 - **Review gates:** reference passes, baseline fails, grader determinism

@@ -169,6 +169,33 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
 - Not done in this slice (moved to later slices): a Postgres CI job (slice 8)
   and the multiprocessing registration race (slice 5).
 
+## Slice 4 decisions
+
+- Shingles: instruction word 3-grams (lower-cased, markdown punctuation
+  dropped) and solution code 5-grams. Solutions are tokenized with Python's
+  `tokenize` (comments, docstrings and layout dropped, strings become `STR`,
+  identifiers that are not keywords or public builtins become `ID<n>` in order
+  of first use; `_` is renamed too because `dir(builtins)` only has it in a
+  REPL). Sources Python cannot tokenize fall back to a regex tokenizer with
+  the same identifier rule that strips `#` and `//` line comments.
+- MinHash: BLAKE2b shingle hashes mod 2**61 - 1 and `(a*x + b) mod p`
+  coefficients derived from the seed with keyed BLAKE2b, so signatures are
+  identical across processes and `PYTHONHASHSEED` (tested in a subprocess).
+- LSH: bands and rows minimize equally weighted false positive plus false
+  negative area under the S-curve over `bands * rows <= num_perm`; at 128
+  permutations that gives 37x3 (0.3), 25x5 (0.5), 14x9 (0.7) and 5x25 (0.9).
+- Two indexes, one per signature; a pair is a near-duplicate when either the
+  instruction or the solution estimate reaches the threshold, and every LSH
+  candidate is confirmed with the estimate before it is reported.
+- Corpus finding: hand-written instruction paraphrases share only 0.12-0.48
+  of their word 3-grams with the original, so on this corpus the solution
+  signature carries the detection; a reworded instruction over a genuinely
+  rewritten solution is not caught at 0.5.
+- Done: tokenizer, MinHash, LSH index and optimizer, the paraphrase corpus
+  tests and `taskledger similar PATH...` (offline pairwise check). Not done
+  yet: signatures and band buckets persisted in the ledger, `taskledger
+  ledger check PATH` and `--allow-near-dup` with an audit entry.
+
 ## Status
 
 | Slice | State |
@@ -177,7 +204,7 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
 | 1. Bundle schema, loader, canonical hashing | done |
 | 2. Linter, rule registry, SARIF | done |
 | 3. Dedupe cache and ledger core | done |
-| 4. Near-duplicate detection | todo |
+| 4. Near-duplicate detection | partial: shingles, seeded MinHash, LSH optimizer, paraphrase corpus, `taskledger similar` done; ledger persistence and `ledger check` todo |
 | 5. Locks, leases, build cache, concurrency tests | todo |
 | 6. Review gates and GitHub Action | todo |
 | 7. FastAPI service and metrics | todo |

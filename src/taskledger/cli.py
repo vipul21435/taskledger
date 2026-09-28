@@ -29,8 +29,8 @@ from taskledger.settings import Settings, parse_size
 app = typer.Typer(
     name="taskledger",
     help=(
-        "Validate, lint and content-hash benchmark task bundles, dedupe them in a "
-        "content-addressed cache and track them in a shared ledger."
+        "Validate, lint and content-hash benchmark task bundles, find near-duplicates, "
+        "dedupe them in a content-addressed cache and track them in a shared ledger."
     ),
     no_args_is_help=True,
     add_completion=False,
