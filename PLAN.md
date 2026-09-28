@@ -126,11 +126,11 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
 | --- | --- |
 | Scaffold (pyproject, uv.lock, tooling, CI, README) | done |
 | 1. Bundle schema, loader, canonical hashing | done |
-| 2. Linter, rule registry, SARIF | todo |
+| 2. Linter, rule registry, SARIF | partial: registry, TL000-TL004, text/JSON, lint and rules CLI done; TL005, TL006, SARIF todo |
 | 3. Dedupe cache and ledger core | todo |
 | 4. Near-duplicate detection | todo |
 | 5. Locks, leases, build cache, concurrency tests | todo |
 | 6. Review gates and GitHub Action | todo |
 | 7. FastAPI service and metrics | todo |
-| 8. Docker, compose, end-to-end demo | todo |
+| 8. Docker, compose, end-to-end demo | partial: digest-pinned image, scripts/demo.sh, make demo/docker-demo, CI demo job done; compose, Postgres CI todo |
 | 9. Benchmarks and docs polish | todo |
