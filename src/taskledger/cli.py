@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -10,6 +11,7 @@ import typer
 
 from taskledger import __version__
 from taskledger.bundle import HashError, LoadResult, hash_bundle, load_bundle
+from taskledger.lint import REGISTRY, UnknownSelectorError, format_json, format_text, lint_paths
 
 app = typer.Typer(
     name="taskledger",
@@ -117,3 +119,67 @@ def hash_cmd(
         typer.echo(json.dumps(record, indent=2))
     else:
         typer.echo(f"{digest.value}  {path}")
+
+
+class LintFormat(StrEnum):
+    """Output formats of ``taskledger lint``."""
+
+    TEXT = "text"
+    JSON = "json"
+
+
+def _split_selectors(values: list[str] | None) -> list[str]:
+    """Flatten repeated and comma separated ``--select``/``--ignore`` values."""
+    return [part.strip() for value in values or [] for part in value.split(",") if part.strip()]
+
+
+@app.command("lint")
+def lint_cmd(
+    paths: Annotated[list[Path], typer.Argument(help="Bundle directories to lint.")],
+    output_format: Annotated[
+        LintFormat, typer.Option("--format", "-f", help="Report format.")
+    ] = LintFormat.TEXT,
+    select: Annotated[
+        list[str] | None,
+        typer.Option(help="Rule codes or prefixes to enable (repeatable, comma separated)."),
+    ] = None,
+    ignore: Annotated[
+        list[str] | None,
+        typer.Option(help="Rule codes or prefixes to disable (repeatable, comma separated)."),
+    ] = None,
+    hints: Annotated[
+        bool, typer.Option("--hints/--no-hints", help="Print a fix hint under each finding.")
+    ] = True,
+) -> None:
+    """Run the lint rules over bundles.
+
+    --select and --ignore are applied after the [lint] section of each
+    bundle's task.toml. Exit code 1 if any finding is an error, 2 on an
+    unknown rule code.
+    """
+    try:
+        reports = lint_paths(
+            [str(path) for path in paths],
+            select=_split_selectors(select),
+            ignore=_split_selectors(ignore),
+        )
+    except UnknownSelectorError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if output_format is LintFormat.JSON:
+        typer.echo(format_json(reports), nl=False)
+    else:
+        typer.echo(format_text(reports, hints=hints), nl=False)
+    if any(report.has_errors for report in reports):
+        raise typer.Exit(code=1)
+
+
+@app.command("rules")
+def rules_cmd(as_json: JsonFlag = False) -> None:
+    """List the registered lint rules with their codes and default severities."""
+    rules = REGISTRY.rules
+    if as_json:
+        typer.echo(json.dumps([rule.to_dict() for rule in rules], indent=2))
+        return
+    for rule in rules:
+        typer.echo(f"{rule.code}  {rule.severity.value:<7}  {rule.name}: {rule.description}")

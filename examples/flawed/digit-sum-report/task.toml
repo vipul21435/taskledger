@@ -1,0 +1,28 @@
+# Deliberately flawed bundle used by `make demo` to show what the linter
+# catches. It validates against the schema but breaks review rules.
+schema_version = 1
+
+[task]
+id = "digit-sum-report"
+version = "0.1.0"
+title = "Digit sum report"
+category = "arithmetic"
+difficulty = "easy"
+tags = ["demo", "flawed"]
+authors = ["Vipul Raj Jha"]
+
+[environment]
+dockerfile = "environment/Dockerfile"
+workdir = "/app"
+
+[verifier]
+dockerfile = "verifier/Dockerfile"
+context = "tests"
+command = ["bash", "-c", "pip install pytest && pytest -q tests"]
+
+[solution]
+path = "solution"
+entrypoint = "solve.sh"
+
+[tests]
+path = "tests"
