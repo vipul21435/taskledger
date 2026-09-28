@@ -87,3 +87,13 @@ def test_rules_lists_every_registered_rule(flag: list[str]) -> None:
         lines = result.stdout.splitlines()
         assert [line.split()[0] for line in lines] == codes
         assert lines[4].startswith("TL004  warning  nondeterminism: ")
+
+
+def test_help_lists_only_implemented_commands() -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "Validate, lint and content-hash" in result.stdout
+    for command in ("validate", "hash", "lint", "rules"):
+        assert command in result.stdout
+    lint_help = runner.invoke(app, ["lint", "--help"])
+    assert "after the lint section of each" in lint_help.stdout

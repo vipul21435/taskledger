@@ -15,7 +15,7 @@ from taskledger.lint import REGISTRY, UnknownSelectorError, format_json, format_
 
 app = typer.Typer(
     name="taskledger",
-    help="Lint, dedupe, lock and gate benchmark task bundles before submission.",
+    help="Validate, lint and content-hash benchmark task bundles before submission.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -153,7 +153,7 @@ def lint_cmd(
 ) -> None:
     """Run the lint rules over bundles.
 
-    --select and --ignore are applied after the [lint] section of each
+    --select and --ignore are applied after the lint section of each
     bundle's task.toml. Exit code 1 if any finding is an error, 2 on an
     unknown rule code.
     """
