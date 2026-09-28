@@ -21,7 +21,7 @@ catches those before a reviewer ever sees the task.
 | Command | What it does |
 | --- | --- |
 | `taskledger validate PATH...` | Strict pydantic v2 schema for `task.toml` plus on-disk path checks. Reports every problem at once with a precise location (`task.toml:task.version`). `--json` for machines. |
-| `taskledger lint PATH...` | Rule registry with stable codes, per-rule severity and fix hints, ruff-style `--select`/`--ignore` by code or prefix (also from `[lint]` in `task.toml`), inline `taskledger: ignore[TL004]` suppression, text or JSON output with line and column. |
+| `taskledger lint PATH...` | Rule registry with stable codes, per-rule severity and fix hints, ruff-style `--select`/`--ignore` by code or prefix (also from `[lint]` in `task.toml`), inline `taskledger: ignore[TL004]` suppression, text, JSON or SARIF 2.1.0 output with line and column. |
 | `taskledger rules` | Lists the registered rules (`--json` for machines). |
 | `taskledger hash PATH` | Canonical Merkle-style sha256 of a bundle: cosmetic edits (line endings, manifest formatting, author metadata, OS clutter) never change it, any semantic edit always does. This is the identity for exact-duplicate detection. |
 
@@ -50,7 +50,7 @@ if needed). Verified from a fresh clone:
 git clone https://github.com/vipul21435/taskledger.git
 cd taskledger
 uv sync --frozen
-make demo     # validate, lint and hash the bundled examples (offline, about 1.5 s)
+make demo     # validate, lint (text and SARIF) and hash the bundled examples (offline, about 1.5 s)
 make check    # ruff, mypy --strict, pytest with branch coverage
 ```
 
@@ -108,6 +108,94 @@ $ taskledger lint --format json examples/flawed/digit-sum-report
     "suppressed": 0
   },
   ...
+```
+
+### SARIF for GitHub code scanning
+
+`--format sarif` writes one SARIF 2.1.0 log with a single run. The driver
+lists every rule that ran (id, title, description, the fix hint as help, the
+default level; TL006 is tagged `security` with a `security-severity` of 8.0),
+and each finding becomes a result with `ruleId` and `ruleIndex`, level,
+message, a physical location and a line-independent partial fingerprint.
+Relative paths become percent-encoded URIs under `%SRCROOT%`, so run the
+linter from the repository root; absolute paths become `file://` URIs.
+
+```console
+$ taskledger lint --format sarif examples/flawed/digit-sum-report > lint.sarif; echo $?
+1
+$ head -4 lint.sarif
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+```
+
+One of its 7 results (the redacted TL006 secret):
+
+```json
+{
+  "ruleId": "TL006",
+  "ruleIndex": 6,
+  "level": "error",
+  "message": {
+    "text": "'UPSTREAM_TOKEN' is assigned a high-entropy value (4.6 bits per character) that looks like a secret: [redacted, 24 chars]"
+  },
+  "locations": [
+    {
+      "physicalLocation": {
+        "artifactLocation": {
+          "uri": "examples/flawed/digit-sum-report/tests/test_report.py",
+          "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+          "startLine": 10,
+          "startColumn": 19,
+          "endLine": 10,
+          "endColumn": 43
+        }
+      }
+    }
+  ],
+  "partialFingerprints": {
+    "taskledger/v1": "4f47be9beb1c4d8e70905dd469d32298"
+  }
+}
+```
+
+`taskledger.lint.sarif_problems(document)` checks a log against every
+property the SARIF 2.1.0 schema marks as required (plus its enums and
+minimums, and that each `ruleIndex` points at the rule with the result's id)
+and the result fields GitHub code scanning requires (`ruleId`,
+`message.text`, an artifact URI and `region.startLine`). The tests run it
+over real lint output and over hypothesis-generated reports, and delete or
+corrupt each required field of a valid log to prove the check is enforced
+(`tests/test_lint_sarif.py`). In a workflow, keep the upload step running
+when the lint step fails:
+
+```yaml
+- run: uv run taskledger lint --format sarif examples/bundles/* > lint.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: lint.sarif
+    category: taskledger
+```
+
+### Secrets and size limits
+
+TL006 scans every text file line by line (files above the 4 MiB content cache
+are streamed, so size never hides a key) and never prints the credential: a
+known format keeps only its public prefix (`ghp_[redacted, 40 chars]`), a
+generic secret only its length. The entropy check only looks at values
+assigned to secret-looking names (`api_key`, `"token":`, `DB_PASSWORD=`), so
+sha256 digests and base64 fixtures do not trip it, and placeholders such as
+`changeme`, `${TOKEN}` or `<token>` are skipped. TL005 limits come from
+`[lint]` in `task.toml`:
+
+```toml
+[lint]
+max_file_kb = 1024      # per file (default)
+max_bundle_kb = 20480   # whole bundle (default)
 ```
 
 ### Validate
@@ -179,7 +267,7 @@ flowchart LR
         Context["context.py<br/>LintContext: cached files, text, AST"]
         Rules["rules/<br/>TL000-TL006"]
         Helpers["dockerfile.py, pyast.py, locate.py"]
-        Formats["formats.py<br/>text / JSON"]
+        Formats["formats.py, sarif.py<br/>text / JSON / SARIF 2.1.0"]
     end
 
     CLI --> Loader
@@ -208,16 +296,17 @@ flowchart LR
 ## Measured numbers
 
 Every number below comes from a command run on this repository at the commit
-that added this README (macOS arm64, Python 3.12, Docker 29).
+that last updated this table (macOS arm64, Python 3.12, Docker 29).
 
 | Metric | Value | Reproduce with |
 | --- | --- | --- |
-| Tests | 514 passed | `uv run pytest -q` |
-| Branch coverage | 99.47% (gate: 85%) | `make cov` |
+| Tests | 575 passed | `uv run pytest -q` |
+| Branch coverage | 99.39% (gate: 85%) | `make cov` |
 | Lint rules registered | 7 (TL000-TL006) | `uv run taskledger rules` |
 | Findings on the flawed example | 7 (5 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
 | Findings on the two sample bundles | 0 | `uv run taskledger lint examples/bundles/*` |
-| `make demo` wall time | 1.46 s | `/usr/bin/time -p make demo` |
+| SARIF problems in the flawed example's log | 0 (`[]`; 7 results, 7 rules) | `uv run taskledger lint -f sarif examples/flawed/digit-sum-report \| uv run python -c "import json, sys; from taskledger.lint import sarif_problems; print(sarif_problems(json.load(sys.stdin)))"` |
+| `make demo` wall time | 1.50 s | `/usr/bin/time -p make demo` |
 | Docker image | 51 MB compressed, 236 MB unpacked | `make docker-build && docker image ls taskledger:dev` |
 
 The hash properties in the table above are hypothesis property tests
@@ -248,6 +337,11 @@ reference output with one extra line.
   ignored.
 - **Fingerprints ignore line numbers** (code, file, message, occurrence), so
   moving code does not make an old finding look new to code-scanning tools.
+  The SARIF fingerprint also hashes the artifact URI, so the same finding in
+  two bundles stays two alerts.
+- **Secret findings are redacted at the source.** The rule builds the message
+  from a redacted form, so no formatter, log or SARIF upload can leak the
+  credential.
 - **The image practices what TL002 preaches:** both base images in the
   Dockerfile are pinned by digest, dependencies come from `uv.lock`, and the
   runtime user is non-root (uid 10001).
@@ -292,8 +386,6 @@ graders that recompute every answer independently and pin the input by digest.
 
 Not built yet; tracked slice by slice in [PLAN.md](PLAN.md).
 
-- **SARIF output:** `taskledger lint --format sarif` (SARIF 2.1.0) for GitHub
-  code scanning.
 - **Dedupe cache and ledger core:** a content-addressed object store, a shared
   SQLAlchemy ledger (SQLite, Postgres by URL) with exact and ID collisions, a
   review state machine and a hash-chained, append-only audit log.
@@ -302,7 +394,8 @@ Not built yet; tracked slice by slice in [PLAN.md](PLAN.md).
 - **Build locks:** `fcntl` file locks, DB leases with fencing tokens and stale
   recovery, and a build cache so each environment is built once.
 - **Review gates:** reference passes, baseline fails, grader determinism
-  re-runs, with JSON, Markdown and JUnit reports and a composite GitHub Action.
+  re-runs, with JSON, Markdown and JUnit reports and a composite GitHub Action
+  that uploads the lint SARIF to code scanning.
 - **Service:** FastAPI + Prometheus metrics, docker-compose with Postgres.
 - **Benchmarks and docs:** throughput, near-dup precision/recall, lease
   contention, generated rule reference.

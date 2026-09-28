@@ -120,13 +120,30 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
   `sha256sum`); directory entries carry a kind byte so a file and a
   directory or symlink can never produce the same parent node.
 
+## Slice 2 decisions
+
+- TL005 counts the same file set the canonical hash covers (no `.git`,
+  `__pycache__` or symlinks). A file over `max_file_kb` is reported at the
+  file; a bundle over `max_bundle_kb` at `lint.max_bundle_kb` in `task.toml`
+  (its `[lint]` header, else line 1) with the three largest files named.
+- TL006 runs on every text file; files above the 4 MiB content cache are
+  streamed (binary if the first 8 KiB hold a NUL). Known formats are exact
+  provider shapes; the entropy check is gated on a secret-looking name, needs
+  16+ characters with letters and digits and at least 3.5 bits per character
+  (3.0 for hex). Messages are built from a redacted form only.
+- SARIF: one run per invocation (GitHub rejects several runs with the same
+  tool and category), rules = union of the rules that ran, columns declared as
+  Unicode code points, `%SRCROOT%`-relative URIs for relative paths. The
+  required-fields checker lives in `src/` so the gates runner (slice 6) can
+  reuse it before an upload.
+
 ## Status
 
 | Slice | State |
 | --- | --- |
 | Scaffold (pyproject, uv.lock, tooling, CI, README) | done |
 | 1. Bundle schema, loader, canonical hashing | done |
-| 2. Linter, rule registry, SARIF | partial: registry, TL000-TL006, text/JSON, lint and rules CLI done; SARIF todo |
+| 2. Linter, rule registry, SARIF | done |
 | 3. Dedupe cache and ledger core | todo |
 | 4. Near-duplicate detection | todo |
 | 5. Locks, leases, build cache, concurrency tests | todo |
