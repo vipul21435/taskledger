@@ -191,10 +191,16 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
   of their word 3-grams with the original, so on this corpus the solution
   signature carries the detection; a reworded instruction over a genuinely
   rewritten solution is not caught at 0.5.
-- Done: tokenizer, MinHash, LSH index and optimizer, the paraphrase corpus
-  tests and `taskledger similar PATH...` (offline pairwise check). Not done
-  yet: signatures and band buckets persisted in the ledger, `taskledger
-  ledger check PATH` and `--allow-near-dup` with an audit entry.
+- `taskledger similar PATH...` (not in the original slice text) compares
+  bundles offline without a ledger.
+- Ledger: `task_signatures` (one row per submission, signatures as
+  space-separated integers) and `lsh_buckets` (indexed bucket key per band
+  and signature kind, replaced on revise), Alembic revision 0002. Buckets are
+  cut for threshold 0.5; other thresholds only change confirmation. Each
+  candidate is confirmed against its task's latest submission.
+- `register` checks near-duplicates before its transaction (exact and ID
+  collisions win when both apply); `--allow-near-dup` records the matches and
+  threshold in the audit payload. The near-duplicate check is not race-free.
 
 ## Status
 
@@ -204,7 +210,7 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
 | 1. Bundle schema, loader, canonical hashing | done |
 | 2. Linter, rule registry, SARIF | done |
 | 3. Dedupe cache and ledger core | done |
-| 4. Near-duplicate detection | partial: shingles, seeded MinHash, LSH optimizer, paraphrase corpus, `taskledger similar` done; ledger persistence and `ledger check` todo |
+| 4. Near-duplicate detection | done |
 | 5. Locks, leases, build cache, concurrency tests | todo |
 | 6. Review gates and GitHub Action | todo |
 | 7. FastAPI service and metrics | todo |

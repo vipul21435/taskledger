@@ -28,7 +28,7 @@ catches those before a reviewer ever sees the task.
 | `taskledger hash PATH` | Canonical Merkle-style sha256 of a bundle: cosmetic edits (line endings, manifest formatting, author metadata, OS clutter) never change it, any semantic edit always does. This is the identity for exact-duplicate detection. |
 | `taskledger similar PATH...` | Near-duplicate pairs among bundles: pure-Python seeded MinHash over instruction word shingles and normalized solution tokens (identifiers renamed, comments and layout dropped), an LSH index whose bands and rows are chosen from `--threshold`, and both similarities per pair. Exit 1 if any pair is found. `--json` for machines. |
 | `taskledger cache put\|get\|has\|gc` | Content-addressed object store (dedupe cache): `objects/ab/cdef...` fan-out, atomic temp-file + `os.replace` writes, verify-on-read, size-bounded LRU garbage collection. A bundle is stored file by file under its canonical digests, so an identical or cosmetically different bundle writes nothing. |
-| `taskledger ledger init\|register\|revise\|status\|transition\|history\|verify` | Shared ledger on SQLAlchemy 2.0 with an Alembic baseline (SQLite by default; another URL via `--db` or `TASKLEDGER_DATABASE_URL`, with `psycopg` from the optional `postgres` extra for Postgres, which the tests do not exercise yet): exact collisions by canonical hash enforced by a unique constraint, ID collisions with case and separator folding, a review state machine with typed errors, and an append-only, hash-chained audit log with `verify`. |
+| `taskledger ledger init\|register\|check\|revise\|status\|transition\|history\|verify` | Shared ledger on SQLAlchemy 2.0 with an Alembic baseline (SQLite by default; another URL via `--db` or `TASKLEDGER_DATABASE_URL`, with `psycopg` from the optional `postgres` extra for Postgres, which the tests do not exercise yet): exact collisions by canonical hash enforced by a unique constraint, ID collisions with case and separator folding, near-duplicates from MinHash signatures and LSH buckets stored in the ledger (`check` reports all three kinds together; `register` refuses a near-duplicate unless `--allow-near-dup`, which is audited), a review state machine with typed errors, and an append-only, hash-chained audit log with `verify`. |
 
 Lint rules shipped (`taskledger rules`):
 
@@ -348,8 +348,40 @@ How it works (`src/taskledger/neardup/`):
   reaches the threshold.
 
 The library is also usable directly (`NearDupIndex`, `fingerprint_bundle`).
-Persisting signatures in the ledger and a combined `taskledger ledger check`
-are on the roadmap.
+
+The ledger stores each submission's signatures and its LSH band buckets
+(tables `task_signatures` and `lsh_buckets`, Alembic revision 0002), so
+finding candidates is one indexed query. `taskledger ledger check` reports
+exact, ID and near-duplicate collisions together without writing anything,
+and `register` refuses a near-duplicate unless `--allow-near-dup` is given,
+in which case the matches go into the audit entry. Same scratch directory,
+with `resubmitted-solver` given the ID `linear-system-v2`:
+
+```console
+$ taskledger ledger register --actor alice bundles/integer-linear-system
+registered  integer-linear-system 1.0.0  draft  sha256:dba0892dac61f512e0a6540307f98e373fa9895f56872c4e8edf0bcfb938e4ea
+$ taskledger ledger check bundles/resubmitted-solver
+near-dup  integer-linear-system  1.00  (instruction 0.06, solution 1.00)
+$ taskledger ledger register --actor bob bundles/resubmitted-solver
+error: near-duplicate: 'linear-system-v2' is 1.00 similar to 'integer-linear-system' (instruction 0.06, solution 1.00; threshold 0.5); 1 match(es) in total. Use --allow-near-dup (allow_near_dup=True) to register anyway; the matches are then recorded in the audit log.
+$ taskledger ledger check bundles/integer-linear-system
+exact     integer-linear-system  (same canonical hash sha256:dba0892dac61f512e0a6540307f98e373fa9895f56872c4e8edf0bcfb938e4ea)
+id        integer-linear-system  (folds to the same ID as 'integer-linear-system')
+near-dup  integer-linear-system  1.00  (instruction 1.00, solution 1.00)
+$ taskledger ledger register --actor bob --allow-near-dup bundles/resubmitted-solver
+registered  linear-system-v2 1.0.0  draft  sha256:82058fca8996f97f2f26310d34f59e5427a6a2ca11cde92e4456dc530555d54d
+$ taskledger ledger history linear-system-v2
+   2  2026-09-28T23:15:48.362657+00:00  bob  register  linear-system-v2  {"content_hash":"sha256:82058fca8996f97f2f26310d34f59e5427a6a2ca11cde92e4456dc530555d54d","near_duplicates_allowed":[{"instruction_similarity":0.0625,"similarity":1.0,"slug":"integer-linear-system","solution_similarity":1.0}],"status":"draft","threshold":0.5,"version":"1.0.0"}  e2040d4b2132
+$ taskledger ledger check bundles/modular-inverse-table
+clear     bundles/modular-inverse-table  (no exact, ID or near-duplicate collision)
+```
+
+Every `check` or `register` that finds a collision exits 1. The buckets are
+cut for threshold 0.5 (25 bands of 5 rows); `--threshold` changes the
+confirmation step only, so thresholds well below 0.5 lose recall. The
+near-duplicate check runs before the registration transaction, so two
+near-duplicate registrations racing each other can both pass it (exact and
+ID collisions are still decided by unique constraints).
 
 ### Ledger
 
@@ -502,8 +534,8 @@ that last updated this table (macOS arm64, Python 3.12, Docker 29).
 
 | Metric | Value | Reproduce with |
 | --- | --- | --- |
-| Tests | 706 passed | `uv run pytest -q` |
-| Branch coverage | 98.45% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
+| Tests | 716 passed | `uv run pytest -q` |
+| Branch coverage | 98.12% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
 | Lint rules registered | 7 (TL000-TL006) | `uv run taskledger rules` |
 | Findings on the flawed example | 7 (5 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
 | Findings on the two sample bundles | 0 | `uv run taskledger lint examples/bundles/*` |
@@ -616,12 +648,9 @@ Not built yet; tracked slice by slice in [PLAN.md](PLAN.md).
   (the baseline creates Postgres triggers for the audit log, but only SQLite
   is exercised by the tests today) and a multiprocessing registration race
   test (slice 5).
-- **Near-duplicate follow-ups (rest of slice 4):** persist signatures and LSH
-  band buckets in the ledger so candidate lookup is a query, and
-  `taskledger ledger check PATH` reporting exact, near-duplicate and ID
-  collisions together, refusing registration above the threshold unless
-  `--allow-near-dup` is given (recorded in the audit log). Instruction-only
-  paraphrase detection is weak today (see Measured numbers).
+- **Near-duplicate follow-ups:** better instruction-only paraphrase detection
+  (hand-written paraphrases share only 0.12-0.48 of their word 3-grams, see
+  Measured numbers) and a race-free near-duplicate gate.
 - **Build locks:** `fcntl` file locks, DB leases with fencing tokens and stale
   recovery, and a build cache so each environment is built once.
 - **Review gates:** reference passes, baseline fails, grader determinism

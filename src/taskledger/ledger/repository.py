@@ -95,7 +95,8 @@ class NearDuplicateError(LedgerError):
             f"near-duplicate: '{slug}' is {best.similarity:.2f} similar to '{best.key}' "
             f"(instruction {best.instruction_similarity:.2f}, solution "
             f"{best.solution_similarity:.2f}; threshold {threshold}); "
-            f"{len(matches)} match(es) in total. Pass allow_near_dup to register anyway."
+            f"{len(matches)} match(es) in total. Use --allow-near-dup (allow_near_dup=True) "
+            "to register anyway; the matches are then recorded in the audit log."
         )
 
 
