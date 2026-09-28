@@ -34,6 +34,8 @@ Lint rules shipped (`taskledger rules`):
 | TL002 | unpinned-base-image | error | `FROM` / `COPY --from` without `@sha256:` (multi-stage and `ARG`-substituted forms included) |
 | TL003 | network-in-grader | error | network imports in the grader, `curl`/`wget`/`pip install`/`git clone` in tests, the verifier command or the verifier image's `CMD`/`ENTRYPOINT` |
 | TL004 | nondeterminism | warning | wall clock, OS entropy, unseeded global `random`/`numpy.random`, salted `hash()`, set-order dependent output and unsorted directory listings in the grader or reference solution |
+| TL005 | oversized-file | error | a file over `lint.max_file_kb` (default 1024 KiB) or a bundle over `lint.max_bundle_kb` (default 20480 KiB), with the largest files named |
+| TL006 | committed-secret | error | 16 known key formats (cloud, code-hosting, chat, payment and model-provider keys, registry tokens, JWTs, PEM private keys, passwords in URLs) plus a Shannon-entropy check on values assigned to secret-looking names; findings are redacted |
 
 Also shipped: two original, genuinely solvable example bundles, one
 deliberately flawed bundle for the demo, a digest-pinned non-root Docker image,
@@ -70,10 +72,11 @@ $ taskledger lint --no-hints examples/flawed/digit-sum-report
 examples/flawed/digit-sum-report/environment/Dockerfile:2:6: error TL002 unpinned-base-image: base image 'python:3.12-slim' is not pinned by digest
 examples/flawed/digit-sum-report/task.toml:21:1: error TL003 network-in-grader: verifier command runs 'pip install' at test time
 examples/flawed/digit-sum-report/tests/test_report.py:7:1: error TL003 network-in-grader: grader imports network module 'requests'
-examples/flawed/digit-sum-report/tests/test_report.py:15:14: warning TL004 nondeterminism: 'random.sample()' uses the global random generator, never seeded in this file
-examples/flawed/digit-sum-report/tests/test_report.py:22:56: warning TL004 nondeterminism: 'time.time()' reads the wall clock, so the result changes between runs
+examples/flawed/digit-sum-report/tests/test_report.py:10:19: error TL006 committed-secret: 'UPSTREAM_TOKEN' is assigned a high-entropy value (4.6 bits per character) that looks like a secret: [redacted, 24 chars]
+examples/flawed/digit-sum-report/tests/test_report.py:16:14: warning TL004 nondeterminism: 'random.sample()' uses the global random generator, never seeded in this file
+examples/flawed/digit-sum-report/tests/test_report.py:23:56: warning TL004 nondeterminism: 'time.time()' reads the wall clock, so the result changes between runs
 examples/flawed/digit-sum-report/verifier/Dockerfile:1:6: error TL002 unpinned-base-image: base image 'python:3.12-slim' is not pinned by digest
-Found 6 findings (4 errors, 2 warnings) in 1 of 1 bundle.
+Found 7 findings (5 errors, 2 warnings) in 1 of 1 bundle.
 $ echo $?
 1
 
@@ -98,8 +101,8 @@ $ taskledger lint --format json examples/flawed/digit-sum-report
   "summary": {
     "bundles": 1,
     "bundles_with_findings": 1,
-    "findings": 6,
-    "error": 4,
+    "findings": 7,
+    "error": 5,
     "warning": 2,
     "note": 0,
     "suppressed": 0
@@ -174,7 +177,7 @@ flowchart LR
         Engine["engine.py<br/>selection, suppression, fingerprints"]
         Registry["registry.py<br/>@rule codes, select/ignore"]
         Context["context.py<br/>LintContext: cached files, text, AST"]
-        Rules["rules/<br/>TL000-TL004"]
+        Rules["rules/<br/>TL000-TL006"]
         Helpers["dockerfile.py, pyast.py, locate.py"]
         Formats["formats.py<br/>text / JSON"]
     end
@@ -209,10 +212,10 @@ that added this README (macOS arm64, Python 3.12, Docker 29).
 
 | Metric | Value | Reproduce with |
 | --- | --- | --- |
-| Tests | 425 passed | `uv run pytest -q` |
-| Branch coverage | 99.43% (gate: 85%) | `make cov` |
-| Lint rules registered | 5 (TL000-TL004) | `uv run taskledger rules` |
-| Findings on the flawed example | 6 (4 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
+| Tests | 514 passed | `uv run pytest -q` |
+| Branch coverage | 99.47% (gate: 85%) | `make cov` |
+| Lint rules registered | 7 (TL000-TL006) | `uv run taskledger rules` |
+| Findings on the flawed example | 7 (5 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
 | Findings on the two sample bundles | 0 | `uv run taskledger lint examples/bundles/*` |
 | `make demo` wall time | 1.46 s | `/usr/bin/time -p make demo` |
 | Docker image | 51 MB compressed, 236 MB unpacked | `make docker-build && docker image ls taskledger:dev` |
@@ -289,9 +292,8 @@ graders that recompute every answer independently and pin the input by digest.
 
 Not built yet; tracked slice by slice in [PLAN.md](PLAN.md).
 
-- **Rest of the linter:** TL005 oversized files, TL006 committed secrets
-  (known key formats plus an entropy check, redacted output), and SARIF 2.1.0
-  output for GitHub code scanning.
+- **SARIF output:** `taskledger lint --format sarif` (SARIF 2.1.0) for GitHub
+  code scanning.
 - **Dedupe cache and ledger core:** a content-addressed object store, a shared
   SQLAlchemy ledger (SQLite, Postgres by URL) with exact and ID collisions, a
   review state machine and a hash-chained, append-only audit log.

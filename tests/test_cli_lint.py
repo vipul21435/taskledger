@@ -29,10 +29,10 @@ def test_flawed_example_fails_with_every_rule_it_breaks() -> None:
     result = runner.invoke(app, ["lint", "--format", "json", str(FLAWED)])
     assert result.exit_code == 1
     report = json.loads(result.stdout)
-    assert report["summary"]["error"] == 4
+    assert report["summary"]["error"] == 5
     assert report["summary"]["warning"] == 2
     codes = sorted({finding["code"] for finding in report["bundles"][0]["findings"]})
-    assert codes == ["TL002", "TL003", "TL004"]
+    assert codes == ["TL002", "TL003", "TL004", "TL006"]
 
 
 def test_text_output_with_and_without_hints(make_bundle: BundleFactory) -> None:

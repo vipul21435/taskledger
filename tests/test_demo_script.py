@@ -30,7 +30,7 @@ def test_demo_script_passes() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
-    assert "Found 6 findings (4 errors, 2 warnings) in 1 of 1 bundle." in out
+    assert "Found 7 findings (5 errors, 2 warnings) in 1 of 1 bundle." in out
     assert "(exit code 1, as expected)" in out
     assert "(identical: a resubmission with only cosmetic edits is a duplicate)" in out
     assert "(different: this is new content)" in out

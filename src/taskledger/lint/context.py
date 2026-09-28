@@ -18,7 +18,7 @@ import os
 import re
 import tomllib
 import warnings
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -41,6 +41,8 @@ from taskledger.lint.locate import split_lines, toml_line
 
 #: Content rules skip files larger than this; TL005 reports them instead.
 MAX_SCAN_BYTES: Final = 4 * 1024 * 1024
+#: How much of a large file :meth:`LintContext.stream_lines` sniffs for NUL bytes.
+BINARY_SNIFF_BYTES: Final = 8192
 
 _SHEBANG_RE: Final = re.compile(rb"#![^\n]*\b(?P<interp>python3?|bash|sh|dash|zsh)\b")
 _SHELL_SUFFIXES: Final = (".sh", ".bash")
@@ -182,6 +184,31 @@ class LintContext:
         """Lines of a text file without line endings; empty for binary files."""
         text = self.text(relative)
         return tuple(split_lines(text)) if text is not None else ()
+
+    def stream_lines(self, relative: str) -> Iterator[str]:
+        """Lines of a text file of any size, for rules that must see every byte.
+
+        Files up to :data:`MAX_SCAN_BYTES` come from the cache like
+        :meth:`lines`; larger ones are streamed without caching and count as
+        binary when their first :data:`BINARY_SNIFF_BYTES` hold a NUL byte.
+        """
+        try:
+            size = self.size(relative)
+        except OSError:
+            return
+        if size <= MAX_SCAN_BYTES:
+            yield from self.lines(relative)
+            return
+        path = self.path(relative)
+        try:
+            with path.open("rb") as raw:
+                if b"\x00" in raw.read(BINARY_SNIFF_BYTES):
+                    return
+            with path.open(encoding="utf-8", errors="replace", newline=None) as handle:
+                for line in handle:  # universal newlines: CRLF, CR and LF, like split_lines
+                    yield line.removesuffix("\n")
+        except OSError:
+            return
 
     def is_python(self, relative: str) -> bool:
         """``*.py`` files and extension-less files with a python shebang."""
