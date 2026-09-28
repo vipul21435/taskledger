@@ -88,6 +88,15 @@ def test_canonical_manifest_drops_defaults_and_metadata() -> None:
     }
 
 
+def test_canonical_manifest_drops_the_lint_section() -> None:
+    configured = MANIFEST.model_validate(
+        {**MANIFEST.model_dump(mode="json"), "lint": {"ignore": ["TL004"], "max_file_kb": 8}}
+    )
+    assert configured.lint.max_file_kb == 8
+    assert canonical_manifest(configured) == canonical_manifest(MANIFEST)
+    assert hash_files({}, configured) == hash_files({}, MANIFEST)
+
+
 def test_digest_bytes_normalizes_text_but_not_binary() -> None:
     text = digest_bytes("a.txt", b"x\r\ny\rz\n")
     assert (text.kind, text.size) == ("text", 6)

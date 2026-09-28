@@ -90,6 +90,17 @@ METADATA = st.fixed_dictionaries(
 )
 
 
+LINT = st.fixed_dictionaries(
+    {},
+    optional={
+        "select": st.lists(st.sampled_from(["ALL", "TL", "TL00", "TL002", "TL004"]), max_size=3),
+        "ignore": st.lists(st.sampled_from(["TL001", "TL005", "TL006"]), max_size=3),
+        "max_file_kb": st.integers(1, 4096),
+        "max_bundle_kb": st.integers(1, 65536),
+    },
+)
+
+
 def _toml_value(value: object, literal: bool) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -203,6 +214,15 @@ def test_metadata_never_changes_the_hash(
     a["task"] |= meta_a
     b["task"] |= meta_b
     first, second = Manifest.model_validate(a), Manifest.model_validate(b)
+    assert hash_files({}, first) == hash_files({}, second)
+
+
+@given(manifest_data(), LINT, LINT)
+def test_lint_configuration_never_changes_the_hash(
+    manifest: dict[str, Any], lint_a: dict[str, Any], lint_b: dict[str, Any]
+) -> None:
+    first = Manifest.model_validate({**manifest, "lint": lint_a})
+    second = Manifest.model_validate({**manifest, "lint": lint_b})
     assert hash_files({}, first) == hash_files({}, second)
 
 

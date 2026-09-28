@@ -40,6 +40,10 @@ SCHEMA_VERSION: Final = 1
 #: They never influence the canonical content hash.
 METADATA_FIELDS: Final = ("authors", "created_at", "notes")
 
+#: Top-level sections that configure tooling rather than describe the task.
+#: They never influence the canonical content hash either.
+TOOLING_SECTIONS: Final = ("lint",)
+
 _SLUG_RE: Final = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _SEMVER_RE: Final = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
@@ -50,6 +54,7 @@ _SEMVER_RE: Final = re.compile(
 _ENV_NAME_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PLATFORM_RE: Final = re.compile(r"[a-z0-9]+/[a-z0-9_]+(?:/[a-z0-9]+)?")
 _WINDOWS_DRIVE_RE: Final = re.compile(r"[A-Za-z]:")
+_SELECTOR_RE: Final = re.compile(r"ALL|[A-Z]{1,8}[0-9]{0,4}")
 
 MAX_TAGS: Final = 16
 
@@ -165,6 +170,16 @@ def _env_name(value: str) -> str:
     return value
 
 
+def _rule_selector(value: str) -> str:
+    if _SELECTOR_RE.fullmatch(value) is None:
+        raise PydanticCustomError(
+            "invalid_rule_selector",
+            "must be ALL, a rule code such as TL002 or a code prefix such as TL00, got '{value}'",
+            {"value": value},
+        )
+    return value
+
+
 def _array_to_tuple(value: object) -> object:
     """TOML arrays arrive as lists; strict mode only accepts tuples for tuple fields."""
     return tuple(value) if isinstance(value, list) else value
@@ -199,6 +214,8 @@ Tags = Annotated[
 ]
 Authors = Annotated[tuple[NonBlank, ...], BeforeValidator(_array_to_tuple)]
 Command = Annotated[tuple[NonBlank, ...], BeforeValidator(_array_to_tuple), Field(min_length=1)]
+RuleSelector = Annotated[str, AfterValidator(_rule_selector)]
+RuleSelectors = Annotated[tuple[RuleSelector, ...], BeforeValidator(_array_to_tuple)]
 
 
 class _Section(BaseModel):
@@ -295,6 +312,20 @@ class Resources(_Section):
     network: bool = False
 
 
+class LintSettings(_Section):
+    """``[lint]``: linter configuration; never part of the canonical content hash.
+
+    ``select`` and ``ignore`` take rule codes (``TL002``), code prefixes
+    (``TL00``) or ``ALL``. Whether a code exists is checked by the linter, which
+    owns the rule registry.
+    """
+
+    select: RuleSelectors = ()
+    ignore: RuleSelectors = ()
+    max_file_kb: int = Field(default=1024, ge=1, le=1_048_576)
+    max_bundle_kb: int = Field(default=20_480, ge=1, le=16_777_216)
+
+
 @dataclass(frozen=True, slots=True)
 class DeclaredPath:
     """A path the manifest promises exists, with the field that declared it."""
@@ -317,6 +348,7 @@ class Manifest(_Section):
     baseline: BaselineSpec | None = None
     timeouts: Timeouts = Field(default_factory=Timeouts)
     resources: Resources = Field(default_factory=Resources)
+    lint: LintSettings = Field(default_factory=LintSettings)
 
     def declared_paths(self) -> tuple[DeclaredPath, ...]:
         """Every path the bundle must contain, in manifest order."""

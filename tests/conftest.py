@@ -33,6 +33,15 @@ DEFAULT_FILES: Mapping[str, str] = {
 }
 
 
+PINNED_BASE = "python:3.12-slim@sha256:" + "4f" * 32
+
+#: Overrides that make the default bundle lint-clean (pinned base images).
+LINT_CLEAN_FILES: Mapping[str, str] = {
+    "environment/Dockerfile": f"FROM {PINNED_BASE}\nWORKDIR /app\n",
+    "verifier/Dockerfile": f"FROM {PINNED_BASE}\nCOPY tests/ /grader/tests/\n",
+}
+
+
 class BundleFactory:
     """Writes a bundle directory under a temporary root."""
 

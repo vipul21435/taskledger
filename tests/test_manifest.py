@@ -287,3 +287,31 @@ def test_build_args_and_explicit_context_are_kept() -> None:
     environment = Manifest.model_validate(data).environment
     assert environment.build_args == {"PY_VERSION": "3.12", "_EXTRA": ""}
     assert environment.effective_context == "."
+
+
+def test_lint_section_defaults_and_values() -> None:
+    manifest = Manifest.model_validate(BASE)
+    assert manifest.lint.select == ()
+    assert manifest.lint.ignore == ()
+    assert manifest.lint.max_file_kb == 1024
+    assert manifest.lint.max_bundle_kb == 20480
+    configured = Manifest.model_validate(
+        with_field("lint", {"select": ["ALL"], "ignore": ["TL00", "TL004"], "max_file_kb": 8})
+    )
+    assert configured.lint.select == ("ALL",)
+    assert configured.lint.ignore == ("TL00", "TL004")
+    assert configured.lint.max_file_kb == 8
+
+
+@pytest.mark.parametrize("selector", ["tl001", "TL-1", "", "TL00001", "TL0X", "T L"])
+def test_lint_selectors_must_look_like_codes(selector: str) -> None:
+    assert errors_for(with_field("lint.select", [selector])) == [
+        (("lint", "select", 0), "invalid_rule_selector")
+    ]
+
+
+@pytest.mark.parametrize(("field", "value"), [("max_file_kb", 0), ("max_bundle_kb", 0)])
+def test_lint_limits_are_bounded(field: str, value: int) -> None:
+    assert errors_for(with_field(f"lint.{field}", value)) == [
+        (("lint", field), "greater_than_equal")
+    ]

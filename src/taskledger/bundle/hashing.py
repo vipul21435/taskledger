@@ -7,8 +7,9 @@ Cosmetic changes (hash unchanged):
 
 - CRLF and lone CR line endings in text files (normalized to LF);
 - ``task.toml`` formatting: comments, whitespace, key and table order, string
-  quoting, values spelled out that equal their defaults, and the metadata
-  fields ``authors``, ``created_at`` and ``notes``;
+  quoting, values spelled out that equal their defaults, the metadata fields
+  ``authors``, ``created_at`` and ``notes``, and the ``[lint]`` tooling
+  section (linter configuration says nothing about what the task is);
 - ignored entries (:data:`DEFAULT_IGNORE`: ``.DS_Store``, ``__pycache__``,
   ``.git`` and similar), empty directories, file modes, timestamps and
   directory listing order;
@@ -16,14 +17,14 @@ Cosmetic changes (hash unchanged):
 
 Semantic changes (hash changes): any other byte of any other file, adding,
 removing or renaming a file, retargeting a symlink, and any manifest value
-other than the metadata fields.
+other than the metadata fields and tooling sections.
 
 Algorithm ``tl-merkle-sha256/v1``:
 
 - A file with no NUL byte is text and has its line endings normalized; any
   other file is binary and hashed as is. The root ``task.toml`` is replaced by
-  its canonical JSON (validated values, sorted keys, defaults and metadata
-  dropped). A symlink contributes its target string and is never followed.
+  its canonical JSON (validated values, sorted keys, defaults, metadata and
+  tooling sections dropped). A symlink contributes its target string and is never followed.
 - Each file contributes ``sha256(content)``, so for LF-only text files the
   per-file digest matches ``sha256sum``.
 - A directory node is ``sha256(0x01 || entries)`` over its children sorted by
@@ -46,7 +47,12 @@ from pathlib import Path
 from typing import Final, Literal
 
 from taskledger.bundle.loader import Bundle
-from taskledger.bundle.manifest import MANIFEST_FILENAME, METADATA_FIELDS, Manifest
+from taskledger.bundle.manifest import (
+    MANIFEST_FILENAME,
+    METADATA_FIELDS,
+    TOOLING_SECTIONS,
+    Manifest,
+)
 
 ALGORITHM: Final = "tl-merkle-sha256/v1"
 
@@ -158,10 +164,10 @@ class NewlineNormalizer:
 
 
 def canonical_manifest(manifest: Manifest) -> bytes:
-    """Canonical JSON of the validated manifest, without defaults or metadata."""
-    data = manifest.model_dump(
-        mode="json", exclude_defaults=True, exclude={"task": set(METADATA_FIELDS)}
-    )
+    """Canonical JSON of the validated manifest, without defaults, metadata or tooling."""
+    exclude: dict[str, set[str] | bool] = {"task": set(METADATA_FIELDS)}
+    exclude.update(dict.fromkeys(TOOLING_SECTIONS, True))
+    data = manifest.model_dump(mode="json", exclude_defaults=True, exclude=exclude)
     text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return text.encode("utf-8")
 
