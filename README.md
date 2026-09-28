@@ -5,8 +5,10 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 Submission pipeline tooling for teams that build benchmark tasks for AI coding
-agents: schema-checked task bundles, review lint rules, and a canonical content
-hash for dedupe, with a shared collision ledger and build locks on the roadmap.
+agents: schema-checked task bundles, review lint rules, a canonical content
+hash, a content-addressed dedupe cache and a shared collision ledger with a
+review state machine and a hash-chained audit log. Build locks and review
+gates are on the roadmap.
 
 A benchmark task is a small bundle: an instruction, a pinned environment image,
 a reference solution and a byte-exact grader. When dozens of people author
@@ -24,6 +26,8 @@ catches those before a reviewer ever sees the task.
 | `taskledger lint PATH...` | Rule registry with stable codes, per-rule severity and fix hints, ruff-style `--select`/`--ignore` by code or prefix (also from `[lint]` in `task.toml`), inline `taskledger: ignore[TL004]` suppression, text, JSON or SARIF 2.1.0 output with line and column. |
 | `taskledger rules` | Lists the registered rules (`--json` for machines). |
 | `taskledger hash PATH` | Canonical Merkle-style sha256 of a bundle: cosmetic edits (line endings, manifest formatting, author metadata, OS clutter) never change it, any semantic edit always does. This is the identity for exact-duplicate detection. |
+| `taskledger cache put\|get\|has\|gc` | Content-addressed object store (dedupe cache): `objects/ab/cdef...` fan-out, atomic temp-file + `os.replace` writes, verify-on-read, size-bounded LRU garbage collection. A bundle is stored file by file under its canonical digests, so an identical or cosmetically different bundle writes nothing. |
+| `taskledger ledger init\|register\|status\|transition\|history\|verify` | Shared ledger on SQLAlchemy 2.0 with an Alembic baseline (SQLite by default; another URL via `--db` or `TASKLEDGER_DATABASE_URL`, with `psycopg` from the optional `postgres` extra for Postgres, which the tests do not exercise yet): exact collisions by canonical hash enforced by a unique constraint, ID collisions with case and separator folding, a review state machine with typed errors, and an append-only, hash-chained audit log with `verify`. |
 
 Lint rules shipped (`taskledger rules`):
 
@@ -39,7 +43,8 @@ Lint rules shipped (`taskledger rules`):
 
 Also shipped: two original, genuinely solvable example bundles, one
 deliberately flawed bundle for the demo, a digest-pinned non-root Docker image,
-and `make demo`.
+and `make demo` (validate, lint, hash, cache, register, collide, review,
+verify).
 
 ## Quickstart
 
@@ -50,7 +55,7 @@ if needed). Verified from a fresh clone:
 git clone https://github.com/vipul21435/taskledger.git
 cd taskledger
 uv sync --frozen
-make demo     # validate, lint (text and SARIF) and hash the bundled examples (offline, about 1.5 s)
+make demo     # validate, lint, hash, cache and register the bundled examples (offline)
 make check    # ruff, mypy --strict, pytest with branch coverage
 ```
 
@@ -251,11 +256,112 @@ container (`make demo` and `make docker-demo` print the same digests).
 `--json` adds per-file digests; for LF-only text a file digest equals
 `sha256sum`.
 
+### Dedupe cache
+
+`taskledger cache` is a content-addressed object store under
+`$TASKLEDGER_HOME/cache` (default `.taskledger/cache`, or `--cache-dir`). A
+bundle is stored entry by entry under its canonical per-file digests (the
+same digests the bundle hash is built from) plus one tree object, so a second
+copy of a bundle, or a copy with only cosmetic edits, writes nothing:
+
+```console
+$ taskledger cache put examples/bundles/modular-inverse-table
+sha256:7f63fb2cee4940a96c2dd0371b92600aded5cba3286a2ace486e2c5268e33f19  examples/bundles/modular-inverse-table  (stored: bundle sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa, 9 of 9 objects new, 6600 of 6600 bytes written)
+$ taskledger cache put examples/bundles/modular-inverse-table
+sha256:7f63fb2cee4940a96c2dd0371b92600aded5cba3286a2ace486e2c5268e33f19  examples/bundles/modular-inverse-table  (already cached: bundle sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa, 0 of 9 objects new, 0 of 6600 bytes written)
+$ taskledger cache get sha256:7f63fb2cee4940a96c2dd0371b92600aded5cba3286a2ace486e2c5268e33f19 | head -c 120
+{"bundle_hash":"sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa","entries":[{"kind":"text","obje
+$ taskledger cache has sha256:7f63fb2cee4940a96c2dd0371b92600aded5cba3286a2ace486e2c5268e33f19 sha256:0000000000000000000000000000000000000000000000000000000000000000
+present  sha256:7f63fb2cee4940a96c2dd0371b92600aded5cba3286a2ace486e2c5268e33f19
+missing  sha256:0000000000000000000000000000000000000000000000000000000000000000
+$ echo $?
+1
+$ taskledger cache gc --max-size 4K
+removed 6 object(s), freed 2684 bytes; kept 3 object(s), 3916 bytes (budget 4096); 0 stale temp file(s) removed
+```
+
+In `make demo`, the copy of a bundle with one edited file stores `2 of 9
+objects new` (the changed file and a new tree). Plain files work too
+(`taskledger cache put notes.txt`). Writes go to `tmp/`, are fsynced and
+renamed into place with `os.replace`, so readers never see a partial object
+and racing writers of one key both succeed (16 threads in
+`tests/test_cache_store.py`). `get` rehashes what it read; an object whose
+bytes no longer match its key is deleted and reported (exit 1). `get` and a
+repeated `put` refresh an object's modification time, and `gc` deletes the
+least recently used objects until the store fits the budget, plus temp files
+older than an hour left by crashed writers.
+
+### Ledger
+
+`taskledger ledger` keeps tasks, submissions, content hashes and an audit log
+in one database: `--db URL`, else `TASKLEDGER_DATABASE_URL`, else SQLite at
+`$TASKLEDGER_HOME/ledger.db`. Every command first upgrades the schema to the
+Alembic head, so `init` is optional and safe to repeat.
+
+```console
+$ taskledger ledger init
+ledger ready at sqlite:///.taskledger/ledger.db (schema revision 0001)
+$ taskledger ledger register --actor alice examples/bundles/modular-inverse-table
+registered  modular-inverse-table 1.0.0  draft  sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa
+$ taskledger ledger register --actor bob examples/bundles/modular-inverse-table
+error: exact collision: sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa is already registered as modular-inverse-table 1.0.0
+$ echo $?
+1
+$ echo "Print one inverse per line." >> edited/instruction.md   # edited = a copy of the bundle
+$ taskledger ledger register --actor bob edited
+error: ID collision: 'modular-inverse-table' folds to 'modularinversetable', already used by the same ID with different content
+```
+
+IDs are compared case folded with `-`, `_`, `.` and spaces removed, so
+`Matrix_Rank` collides with `matrix-rank`. Review status follows a state
+machine; anything else is refused with a typed `IllegalTransitionError`:
+
+```
+draft -> submitted -> in_review -> accepted | rejected | needs_changes
+needs_changes -> submitted            (accepted and rejected are final)
+```
+
+```console
+$ taskledger ledger transition --actor alice modular-inverse-table submitted
+modular-inverse-table: draft -> submitted
+$ taskledger ledger transition --actor reviewer modular-inverse-table in_review
+modular-inverse-table: submitted -> in_review
+$ taskledger ledger transition --actor reviewer --note "grader reads a fixed path" modular-inverse-table needs_changes
+modular-inverse-table: in_review -> needs_changes
+$ taskledger ledger transition --actor reviewer modular-inverse-table accepted
+error: modular-inverse-table: cannot move from needs_changes to accepted (allowed from needs_changes: submitted)
+$ taskledger ledger history modular-inverse-table
+   1  2026-09-28T22:36:41.581806+00:00  alice  register  modular-inverse-table  {"content_hash":"sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa","status":"draft","version":"1.0.0"}  bcb7c02bd0da
+   2  2026-09-28T22:37:11.566011+00:00  alice  transition  modular-inverse-table  {"from":"draft","to":"submitted"}  fee0395a632c
+   3  2026-09-28T22:37:12.228363+00:00  reviewer  transition  modular-inverse-table  {"from":"submitted","to":"in_review"}  52e0ce293944
+   4  2026-09-28T22:37:12.612071+00:00  reviewer  transition  modular-inverse-table  {"from":"in_review","note":"grader reads a fixed path","to":"needs_changes"}  4a7dd8845528
+$ taskledger ledger verify
+audit chain ok: 4 entries, head 4a7dd8845528dc9b1ab37bf99e11f7a67b4970a51f5ec450675dd2d279304ed4
+```
+
+The audit log is append-only in the database and tamper-evident outside it.
+Triggers refuse `UPDATE` and `DELETE`; each row stores the previous row's
+hash and its own sha256 over canonical JSON of every column, so a row edited
+after the triggers are dropped (or in a restored backup) is caught by
+`verify`, which exits 1 and names the first bad row:
+
+```console
+$ sqlite3 ledger.db "UPDATE audit_log SET actor = 'mallory' WHERE seq = 2"
+Error: stepping, audit_log is append-only (19)
+$ # the same edit after dropping the trigger:
+$ taskledger ledger verify
+audit chain BROKEN at seq 2: row content does not match its hash (row edited) (1 entries verified before it)
+```
+
+Deleting the newest rows leaves a valid prefix, so compare `verify`'s head
+with one recorded earlier to detect truncation. All commands take `--json`
+where they print records (`register`, `status`, `history`, `verify`).
+
 ## Architecture
 
 ```mermaid
 flowchart LR
-    CLI["cli.py (Typer)<br/>validate / lint / rules / hash"]
+    CLI["cli.py (Typer)<br/>validate / lint / rules / hash / cache / ledger"]
 
     subgraph bundle["bundle/"]
         Loader["loader.py<br/>load_bundle -> Bundle or issues"]
@@ -273,7 +379,25 @@ flowchart LR
         Formats["formats.py, sarif.py<br/>text / JSON / SARIF 2.1.0"]
     end
 
+    subgraph cache["cache/"]
+        Store["store.py<br/>content-addressed objects, LRU gc"]
+        BundleCache["bundles.py<br/>bundle entries + tree object"]
+    end
+
+    subgraph ledger["ledger/"]
+        Repo["repository.py<br/>register, transition, history"]
+        States["states.py<br/>review state machine"]
+        Audit["audit.py<br/>hash chain, verify_chain"]
+        Models["models.py + migrations/<br/>SQLAlchemy 2.0, Alembic baseline"]
+    end
+
     CLI --> Loader
+    CLI --> BundleCache --> Store
+    BundleCache --> Hasher
+    CLI --> Repo
+    Repo --> States
+    Repo --> Audit
+    Repo --> Models
     CLI --> Hasher
     CLI --> Engine
     CLI --> Formats
@@ -303,15 +427,18 @@ that last updated this table (macOS arm64, Python 3.12, Docker 29).
 
 | Metric | Value | Reproduce with |
 | --- | --- | --- |
-| Tests | 576 passed | `uv run pytest -q` |
-| Branch coverage | 99.43% (gate: 85%) | `make cov` |
+| Tests | 649 passed | `uv run pytest -q` |
+| Branch coverage | 98.32% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
 | Lint rules registered | 7 (TL000-TL006) | `uv run taskledger rules` |
 | Findings on the flawed example | 7 (5 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
 | Findings on the two sample bundles | 0 | `uv run taskledger lint examples/bundles/*` |
 | SARIF problems in the flawed example's log | 0 (`[]`; 7 results, 7 rules) | `uv run taskledger lint -f sarif examples/flawed/digit-sum-report \| uv run python -c "import json, sys; from taskledger.lint import sarif_problems; print(sarif_problems(json.load(sys.stdin)))"` |
 | GitHub code scanning upload of the sample bundles' SARIF (CI `sarif` job) | processed: tool `taskledger`, 7 rules, 0 results, no errors or warnings | `gh api repos/vipul21435/taskledger/code-scanning/analyses --jq '.[0] \| {tool: .tool.name, rules_count, results_count, error, warning}'` |
-| `make demo` wall time | 1.50 s | `/usr/bin/time -p make demo` |
-| Docker image | 51 MB compressed, 236 MB unpacked | `make docker-build && docker image ls taskledger:dev` |
+| Objects written when the same bundle is cached twice | 9 of 9, then 0 of 9 | `taskledger cache put examples/bundles/modular-inverse-table` (twice) |
+| Objects written for a copy with one edited file | 2 of 9 (the file and a new tree) | `make demo`, step 9 |
+| Audit chain after the demo's review walk | ok, 4 entries | `make demo`, step 11 |
+| `make demo` wall time | 11.46 s (24 CLI calls, each through `uv run`, measured with the machine's load average between 8 and 15) | `/usr/bin/time -p make demo` |
+| Docker image (now with SQLAlchemy and Alembic) | 60.1 MB compressed, 280 MB unpacked | `make docker-build && docker image ls taskledger:dev` |
 
 The hash properties in the table above are hypothesis property tests
 (`tests/test_hashing_properties.py`; CI runs them with
@@ -335,6 +462,20 @@ reference output with one extra line.
   errors, every path must stay inside the bundle (also through symlinks).
 - **Environment images build from `baseline/`**, so a reference solution can
   never leak into the agent image by construction.
+- **Races resolve in the database.** The unique constraint on
+  `content_hashes.hash` decides which of two concurrent registrations of the
+  same content wins; the loser gets the same `ExactCollisionError` a
+  sequential caller would (a test skips the pre-check to prove it). On SQLite
+  every write transaction starts with `BEGIN IMMEDIATE`, so writers queue.
+- **Status changes are compare-and-set** on the old status, and each change
+  is written in the same transaction as its audit row, so the ledger and its
+  history cannot disagree.
+- **The audit hash covers canonical JSON** (sorted keys, ASCII) and the
+  timestamp is stored as the exact string that was hashed, so verification
+  does not depend on how a database round-trips datetimes.
+- **Cache keys are the canonical digests.** Cached bundle entries are the
+  LF-normalized text and canonical manifest, so a key is always
+  `sha256(object bytes)` and verify-on-read needs no side table.
 - **Stable rule codes plus ruff-style selection.** Layers apply in order
   (`task.toml`, then CLI); the more specific selector wins and `ignore` wins a
   tie, so `--select TL004` on the command line re-enables a rule a bundle
@@ -390,9 +531,10 @@ graders that recompute every answer independently and pin the input by digest.
 
 Not built yet; tracked slice by slice in [PLAN.md](PLAN.md).
 
-- **Dedupe cache and ledger core:** a content-addressed object store, a shared
-  SQLAlchemy ledger (SQLite, Postgres by URL) with exact and ID collisions, a
-  review state machine and a hash-chained, append-only audit log.
+- **Ledger follow-ups:** a CI job against a real Postgres service container
+  (the baseline creates Postgres triggers for the audit log, but only SQLite
+  is exercised by the tests today), revising a task's content after
+  `needs_changes`, and a multiprocessing registration race test (slice 5).
 - **Near-duplicate detection:** pure-Python MinHash + LSH over instruction
   shingles and normalized solution tokens.
 - **Build locks:** `fcntl` file locks, DB leases with fencing tokens and stale
@@ -404,8 +546,9 @@ Not built yet; tracked slice by slice in [PLAN.md](PLAN.md).
 - **Benchmarks and docs:** throughput, near-dup precision/recall, lease
   contention, generated rule reference.
 
-`.env.example` lists the settings those slices will read; the current CLI
-reads none of them.
+`.env.example` lists the settings: `TASKLEDGER_HOME` and
+`TASKLEDGER_DATABASE_URL` are read today; the lock TTL and near-duplicate
+threshold are reserved for the slices above.
 
 ## Development
 

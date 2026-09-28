@@ -137,6 +137,36 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
   required-fields checker lives in `src/` so the gates runner (slice 6) can
   reuse it before an upload.
 
+## Slice 3 decisions
+
+- Settings are a small frozen dataclass read from the environment rather than
+  pydantic-settings: two variables do not justify another dependency.
+- The dedupe cache stores each bundle entry's canonical content (LF-normalized
+  text, canonical manifest JSON, symlink target) under its per-file digest,
+  plus a tree object (canonical JSON of the bundle hash and entries). A key is
+  therefore always `sha256(object bytes)`, verify-on-read needs no side
+  table, and re-storing an identical bundle writes nothing.
+- LRU recency is the object's mtime, refreshed by `get` and repeated `put`
+  (atime is unreliable under `noatime`). Objects are written read-only.
+- The ledger folds IDs by case folding and removing `-`, `_`, `.` and
+  whitespace. Exact collisions are checked first, so an identical resubmission
+  under the same ID reports the exact collision.
+- SQLite writers start with `BEGIN IMMEDIATE` (foreign keys on, 30 s busy
+  timeout) so concurrent writers queue instead of failing late. Registration
+  still retries on an IntegrityError and re-runs the collision checks, so the
+  unique constraints decide races on any backend.
+- Audit rows store `at` as the exact string that was hashed; `seq` and
+  `prev_hash` are unique so the chain cannot fork. Triggers block UPDATE and
+  DELETE (plus TRUNCATE on Postgres). Truncating the newest rows leaves a
+  valid prefix, so `verify` prints the head for comparison with a recorded
+  one.
+- Every ledger CLI command upgrades the schema to the Alembic head first;
+  migrations run on the caller's connection (`env.py` refuses to run without
+  one), so there is no alembic.ini to keep in sync.
+- Not done in this slice (moved to later slices): revising a task's content
+  after `needs_changes`, a Postgres CI job (slice 8) and the multiprocessing
+  registration race (slice 5).
+
 ## Status
 
 | Slice | State |
@@ -144,7 +174,7 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
 | Scaffold (pyproject, uv.lock, tooling, CI, README) | done |
 | 1. Bundle schema, loader, canonical hashing | done |
 | 2. Linter, rule registry, SARIF | done |
-| 3. Dedupe cache and ledger core | todo |
+| 3. Dedupe cache and ledger core | done |
 | 4. Near-duplicate detection | todo |
 | 5. Locks, leases, build cache, concurrency tests | todo |
 | 6. Review gates and GitHub Action | todo |

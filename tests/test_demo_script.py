@@ -35,4 +35,10 @@ def test_demo_script_passes() -> None:
     assert "wrote 7 SARIF results (" in out
     assert "(identical: a resubmission with only cosmetic edits is a duplicate)" in out
     assert "(different: this is new content)" in out
+    assert "already cached: bundle sha256:" in out
+    assert "(the edited copy only adds its changed file and a new tree object)" in out
+    assert "exact collision" in result.stderr
+    assert "ID collision" in result.stderr
+    assert "cannot move from accepted to submitted" in result.stderr
+    assert "audit chain ok: 4 entries, head " in out
     assert out.rstrip().endswith("==> Demo finished")

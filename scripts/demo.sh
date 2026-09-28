@@ -74,4 +74,39 @@ echo "semantic: $changed"
 [ "$changed" != "$before" ] || fail "a semantic edit kept the hash"
 echo "(different: this is new content)"
 
+step "9. Dedupe cache: store a bundle twice, then the edited copy"
+export TASKLEDGER_HOME="$WORK/home"
+export TASKLEDGER_DATABASE_URL="sqlite:///$WORK/home/ledger.db"
+tl cache put "$original"
+again=$(tl cache put "$original")
+echo "$again"
+case "$again" in *"already cached"*) ;; *) fail "storing an identical bundle wrote new objects" ;; esac
+tl cache put "$copy"
+echo "(the edited copy only adds its changed file and a new tree object)"
+
+expect_exit() {
+  local want=$1; shift
+  set +e
+  "$@"
+  local got=$?
+  set -e
+  [ "$got" -eq "$want" ] || fail "'$*' exited $got, expected $want"
+  echo "(exit code $got, as expected)"
+}
+
+step "10. Ledger: register, then an exact collision and an ID collision"
+tl ledger init
+tl ledger register --actor alice "$original"
+expect_exit 1 tl ledger register --actor bob "$original"
+expect_exit 1 tl ledger register --actor bob "$copy"
+
+step "11. Review state machine and the hash-chained audit log"
+slug=$(basename "$original")
+tl ledger transition --actor alice "$slug" submitted
+tl ledger transition --actor reviewer "$slug" in_review
+tl ledger transition --actor reviewer --note "grader re-run twice, byte-exact" "$slug" accepted
+expect_exit 1 tl ledger transition --actor alice "$slug" submitted
+tl ledger history "$slug"
+tl ledger verify
+
 step "Demo finished"
