@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
@@ -11,6 +12,7 @@ import typer
 
 from taskledger import __version__
 from taskledger.bundle import HashError, LoadResult, hash_bundle, load_bundle
+from taskledger.cache import CacheError, ObjectStore, cache_bundle
 from taskledger.lint import (
     REGISTRY,
     UnknownSelectorError,
@@ -19,6 +21,7 @@ from taskledger.lint import (
     format_text,
     lint_paths,
 )
+from taskledger.settings import Settings, parse_size
 
 app = typer.Typer(
     name="taskledger",
@@ -194,3 +197,136 @@ def rules_cmd(as_json: JsonFlag = False) -> None:
         return
     for rule in rules:
         typer.echo(f"{rule.code}  {rule.severity.value:<7}  {rule.name}: {rule.description}")
+
+
+cache_app = typer.Typer(
+    help="Content-addressed dedupe cache: objects stored by the sha256 of their bytes.",
+    no_args_is_help=True,
+)
+app.add_typer(cache_app, name="cache")
+
+CacheDir = Annotated[
+    Path | None,
+    typer.Option(
+        "--cache-dir",
+        help="Object store root (default: $TASKLEDGER_HOME/cache, TASKLEDGER_HOME=.taskledger).",
+    ),
+]
+
+
+def _store(cache_dir: Path | None) -> ObjectStore:
+    return ObjectStore(cache_dir or Settings.from_env().cache_dir)
+
+
+def _fail(message: str, code: int = 1) -> typer.Exit:
+    typer.echo(f"error: {message}", err=True)
+    return typer.Exit(code=code)
+
+
+@cache_app.command("put")
+def cache_put_cmd(
+    paths: Annotated[list[Path], typer.Argument(help="Bundle directories or plain files.")],
+    cache_dir: CacheDir = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Store bundles (file by file, by canonical digest) or plain files.
+
+    A bundle is stored as its canonical entries plus one tree object; storing
+    an identical bundle again writes nothing and reports it as already cached.
+    """
+    store = _store(cache_dir)
+    records: list[dict[str, object]] = []
+    for path in paths:
+        try:
+            if path.is_dir():
+                bundle = load_bundle(path)
+                if bundle.bundle is None:
+                    raise _fail(f"{path} is not a valid bundle (run taskledger validate)")
+                result = cache_bundle(store, bundle.bundle)
+                records.append({"path": str(path), "type": "bundle", **result.to_dict()})
+                state = "already cached" if result.already_cached else "stored"
+                line = (
+                    f"{result.tree_key}  {path}  ({state}: bundle {result.bundle_hash}, "
+                    f"{result.new_objects} of {result.objects} objects new, "
+                    f"{result.bytes_written} of {result.bytes_total} bytes written)"
+                )
+            else:
+                put = store.put_file(path)
+                records.append(
+                    {
+                        "path": str(path),
+                        "type": "file",
+                        "key": put.key,
+                        "size": put.size,
+                        "created": put.created,
+                    }
+                )
+                state = "stored" if put.created else "already cached"
+                line = f"{put.key}  {path}  ({state}: {put.size} bytes)"
+        except (OSError, CacheError, HashError) as exc:
+            raise _fail(f"cannot cache {path}: {exc}") from exc
+        if not as_json:
+            typer.echo(line)
+    if as_json:
+        typer.echo(json.dumps(records, indent=2))
+
+
+@cache_app.command("get")
+def cache_get_cmd(
+    key: Annotated[str, typer.Argument(help="Object key (sha256:<hex> or bare hex).")],
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Write to this file, not stdout.")
+    ] = None,
+    cache_dir: CacheDir = None,
+) -> None:
+    """Print a stored object, verified against its key. Exit 1 if missing or corrupt."""
+    try:
+        data = _store(cache_dir).get(key)
+    except (CacheError, ValueError) as exc:
+        raise _fail(str(exc)) from exc
+    if output is None:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    else:
+        output.write_bytes(data)
+
+
+@cache_app.command("has")
+def cache_has_cmd(
+    keys: Annotated[list[str], typer.Argument(help="Object keys to look up.")],
+    cache_dir: CacheDir = None,
+) -> None:
+    """Report whether each key is stored. Exit 1 if any is missing."""
+    store = _store(cache_dir)
+    try:
+        present = [(key, store.has(key)) for key in keys]
+    except ValueError as exc:
+        raise _fail(str(exc), code=2) from exc
+    for key, found in present:
+        typer.echo(f"{'present' if found else 'missing'}  {key}")
+    if not all(found for _, found in present):
+        raise typer.Exit(code=1)
+
+
+@cache_app.command("gc")
+def cache_gc_cmd(
+    max_size: Annotated[
+        str, typer.Option("--max-size", help="Byte budget, e.g. 1048576, 512K, 100MB, 2GiB.")
+    ],
+    cache_dir: CacheDir = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Delete least recently used objects until the store fits --max-size."""
+    try:
+        budget = parse_size(max_size)
+    except ValueError as exc:
+        raise _fail(str(exc), code=2) from exc
+    result = _store(cache_dir).gc(budget)
+    if as_json:
+        typer.echo(json.dumps(result.to_dict(), indent=2))
+        return
+    typer.echo(
+        f"removed {result.removed} object(s), freed {result.freed_bytes} bytes; "
+        f"kept {result.kept} object(s), {result.kept_bytes} bytes "
+        f"(budget {budget}); {result.stale_tmp_removed} stale temp file(s) removed"
+    )
