@@ -16,7 +16,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "alembic>=1.14",
     "pydantic>=2.9",
+    "sqlalchemy>=2.0.36",
     "typer>=0.12",
 ]
 
@@ -25,6 +27,11 @@ taskledger = "taskledger.cli:app"
 
 [project.urls]
 Repository = "https://github.com/vipul21435/taskledger"
+
+[project.optional-dependencies]
+postgres = [
+    "psycopg[binary]>=3.2",
+]
 
 [build-system]
 requires = ["hatchling>=1.26"]
