@@ -97,12 +97,35 @@ Goal: Make the whole system runnable with one command. A slim multi-stage Docker
 
 Goal: Back every claim with a reproducible number and make the repo easy to evaluate. Add benchmarks/ scripts (plain Python, JSON output) for canonical hash throughput, near-duplicate precision/recall and LSH query latency at 1k/10k ledger sizes, lease acquisition latency and contention behavior, and gate runtime on the example bundles, with a `make bench` target. Write docs/architecture.md (components, data model, lock and lease protocol, state machine diagram in Mermaid), docs/rules.md generated from the rule registry (with a test that fails when it is stale), docs/bundle-format.md, and ADRs for the main design choices. Finish README: feature list with real numbers and the command that produced each, CLI and API reference, coverage badge value from `make cov`, and a CHANGELOG for v0.1.0. Commits: benchmarks + make bench; architecture/format docs + ADRs; generated rules reference + README numbers + CHANGELOG.
 
+## Slice 1 decisions
+
+- Sections other than `[task]` default to the conventional layout, so the
+  minimal manifest is `schema_version` plus `[task]`. The model is purely
+  syntactic (usable by the API on a bare manifest); the loader checks declared
+  paths on disk and reports at the same field locations. Schema errors are
+  reported before path errors because paths come from a valid model.
+- Strict mode everywhere (no `"5"` to `5`); TOML arrays are converted to tuples
+  before validation. Tags are sorted, so their order is cosmetic.
+- `baseline/` is the untouched starting workspace. The example environment
+  images are built with `context = "baseline"`, so a reference solution can
+  never leak into the agent image by construction.
+- Hashing hashes the validated manifest (canonical JSON, `exclude_defaults`,
+  metadata dropped) rather than TOML bytes: formatting and spelled-out
+  defaults are cosmetic, and adding a defaulted field in a later schema
+  version does not change existing hashes. A file is text iff it has no NUL
+  byte (the usual git heuristic); only text gets line endings normalized.
+  File modes are not hashed (entry points are run through `bash`). Symlinks
+  are hashed by target and never followed. File names are compared in NFC.
+- Per-file digests are plain sha256 of the canonical content (checkable with
+  `sha256sum`); directory entries carry a kind byte so a file and a
+  directory or symlink can never produce the same parent node.
+
 ## Status
 
 | Slice | State |
 | --- | --- |
 | Scaffold (pyproject, uv.lock, tooling, CI, README) | done |
-| 1. Bundle schema, loader, canonical hashing | todo |
+| 1. Bundle schema, loader, canonical hashing | done |
 | 2. Linter, rule registry, SARIF | todo |
 | 3. Dedupe cache and ledger core | todo |
 | 4. Near-duplicate detection | todo |

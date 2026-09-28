@@ -41,7 +41,7 @@ git clone https://github.com/vipul21435/taskledger.git
 cd taskledger
 make install      # uv sync --frozen + pre-commit hooks
 make check        # ruff, mypy --strict, pytest with coverage
-make demo         # validate the example bundles (grows into the end-to-end demo)
+make demo         # validate and hash the example bundles (grows into the end-to-end demo)
 ```
 
 ## Task bundle format
@@ -108,6 +108,46 @@ Schema errors are reported first; once the manifest is valid, every declared
 path is checked on disk (`file not found`, `expected a directory`,
 `resolves outside the bundle`).
 
+### Hash
+
+`taskledger hash PATH [--json]` prints a canonical, Merkle-style sha256 of a
+bundle. It is the identity used for dedupe and exact-collision checks, so it is
+built to ignore everything that does not change what a task *is* and to change
+on everything that does:
+
+| Never changes the hash (cosmetic) | Always changes the hash (semantic) |
+| --- | --- |
+| CRLF or CR line endings in text files | any other byte of any file |
+| `task.toml` comments, whitespace, key and table order, quoting, defaults written out | any other manifest value (title, version, tags, limits, command, ...) |
+| `authors`, `created_at`, `notes` metadata | adding, removing or renaming a file |
+| `.DS_Store`, `__pycache__`, `*.pyc`, `.git`, tool caches | retargeting a symlink (links are hashed, never followed) |
+| empty directories, file modes, timestamps, NFC vs NFD file names | |
+
+Real run on a copy of an example bundle (every file converted to CRLF, a
+`.DS_Store` added, the author changed, then one grader line appended):
+
+```console
+$ taskledger hash .
+sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa  .
+$ # CRLF everywhere, .DS_Store, different author
+$ taskledger hash .
+sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa  .
+$ echo "# stricter" >> tests/test_inverses.py
+$ taskledger hash .
+sha256:22da1ce1dd43cfb2814c25bdf60c719740e0acdff3a2917c9b338449ce08d93f  .
+```
+
+`--json` adds the per-file digests (`kind` is text, binary, symlink or manifest;
+for LF-only text the digest equals `sha256sum`). The algorithm
+(`tl-merkle-sha256/v1`: leaf digests, directory nodes over sorted
+`kind || name || NUL || digest` entries, a versioned root tag) is documented in
+[`src/taskledger/bundle/hashing.py`](src/taskledger/bundle/hashing.py), and a
+unit test rebuilds a root by hand from that description. Both columns of the
+table above are hypothesis property tests (`tests/test_hashing_properties.py`;
+CI runs them with `HYPOTHESIS_PROFILE=ci`, up to 400 examples per property),
+including disk-versus-memory agreement and
+chunk-boundary safety of the streaming line-ending normalizer.
+
 ## Development
 
 | Command | What it runs |
@@ -118,7 +158,8 @@ path is checked on disk (`file not found`, `expected a directory`,
 | `make cov` | pytest with branch coverage, fails under 85% |
 | `make check` | all of the above, same as CI |
 
-Layout: `src/taskledger/` (typed package, `py.typed`), `tests/`,
+Layout: `src/taskledger/` (typed package, `py.typed`; `bundle/` holds the
+manifest model, loader and hasher), `tests/`, `examples/bundles/`,
 `.github/workflows/ci.yml`.
 
 ## Why this exists

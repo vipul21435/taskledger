@@ -40,6 +40,8 @@ jobs:
         run: uv run mypy
 
       - name: pytest with coverage
+        env:
+          HYPOTHESIS_PROFILE: ci
         run: uv run pytest -q --cov --cov-report=term-missing --cov-report=xml
 
       - name: Upload coverage report

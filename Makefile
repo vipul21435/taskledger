@@ -32,6 +32,7 @@ check: lint typecheck cov ## Everything CI runs
 demo: ## End-to-end demo of the CLI on the example bundles
 	$(UV) run taskledger --version
 	$(UV) run taskledger validate examples/bundles/*
+	@for bundle in examples/bundles/*; do $(UV) run taskledger hash $$bundle; done
 
 clean: ## Remove caches and build output
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov dist build

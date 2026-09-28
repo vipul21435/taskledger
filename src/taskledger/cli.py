@@ -9,7 +9,7 @@ from typing import Annotated, Any
 import typer
 
 from taskledger import __version__
-from taskledger.bundle import LoadResult, load_bundle
+from taskledger.bundle import HashError, LoadResult, hash_bundle, load_bundle
 
 app = typer.Typer(
     name="taskledger",
@@ -83,3 +83,37 @@ def validate_cmd(
                 typer.echo(f"  {issue}")
     if not all_valid:
         raise typer.Exit(code=1)
+
+
+@app.command("hash")
+def hash_cmd(
+    path: Annotated[Path, typer.Argument(help="Bundle directory to hash.")],
+    as_json: JsonFlag = False,
+) -> None:
+    """Print the canonical content hash of a bundle.
+
+    Line endings, manifest formatting, the authors/created_at/notes metadata and
+    OS or tool clutter (.DS_Store, __pycache__, .git) never change the hash; any
+    semantic change does. Exit code 1 if the bundle is invalid.
+    """
+    result = load_bundle(path)
+    if result.bundle is None:
+        typer.echo(f"invalid  {path}  ({len(result.issues)} issue(s))", err=True)
+        for issue in result.issues:
+            typer.echo(f"  {issue}", err=True)
+        raise typer.Exit(code=1)
+    try:
+        digest = hash_bundle(result.bundle)
+    except HashError as exc:
+        typer.echo(f"cannot hash {path}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if as_json:
+        record = {
+            "path": str(path),
+            "id": result.bundle.id,
+            "version": result.bundle.version,
+            **digest.to_dict(),
+        }
+        typer.echo(json.dumps(record, indent=2))
+    else:
+        typer.echo(f"{digest.value}  {path}")

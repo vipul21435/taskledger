@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from hypothesis import settings
+
+# "dev" keeps the local loop fast; CI sets HYPOTHESIS_PROFILE=ci for a deeper search.
+settings.register_profile("dev", max_examples=100, deadline=None)
+settings.register_profile("ci", max_examples=400, deadline=None, print_blob=True)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
 
 MINIMAL_MANIFEST = """\
 schema_version = 1
