@@ -392,7 +392,7 @@ Alembic head, so `init` is optional and safe to repeat.
 
 ```console
 $ taskledger ledger init
-ledger ready at sqlite:///.taskledger/ledger.db (schema revision 0001)
+ledger ready at sqlite:///.taskledger/ledger.db (schema revision 0002)
 $ taskledger ledger register --actor alice examples/bundles/modular-inverse-table
 registered  modular-inverse-table 1.0.0  draft  sha256:0991c712d5e379e7cad99b4acebfcd916dcc90ea5e997c8684d6e44846c6c2aa
 $ taskledger ledger register --actor bob examples/bundles/modular-inverse-table
@@ -534,8 +534,8 @@ that last updated this table (macOS arm64, Python 3.12, Docker 29).
 
 | Metric | Value | Reproduce with |
 | --- | --- | --- |
-| Tests | 716 passed | `uv run pytest -q` |
-| Branch coverage | 98.12% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
+| Tests | 722 passed | `uv run pytest -q` |
+| Branch coverage | 98.13% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
 | Lint rules registered | 7 (TL000-TL006) | `uv run taskledger rules` |
 | Findings on the flawed example | 7 (5 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
 | Findings on the two sample bundles | 0 | `uv run taskledger lint examples/bundles/*` |
@@ -577,8 +577,10 @@ reference output with one extra line.
   sequential caller would (a test skips the pre-check to prove it). On SQLite
   every write transaction starts with `BEGIN IMMEDIATE`, so writers queue.
 - **Status changes are compare-and-set** on the old status, and each change
-  is written in the same transaction as its audit row, so the ledger and its
-  history cannot disagree.
+  is written in the same transaction as its audit row, so the ledger's own
+  commands never leave the task state and its history disagreeing. (Direct
+  edits to the task tables are not detected, and `revise` is not yet
+  compare-and-set; see Known issues.)
 - **The audit hash covers canonical JSON** (sorted keys, ASCII) and the
   timestamp is stored as the exact string that was hashed, so verification
   does not depend on how a database round-trips datetimes.
@@ -639,6 +641,28 @@ table over a composite modulus and a unimodular integer linear system
 (determinant +1 or -1, so exactly one integer answer), both original, with
 graders that recompute every answer independently and pin the input by digest.
 [`examples/flawed/`](examples/flawed/) holds the bundle the demo lints.
+
+## Known issues
+
+Found in review and not fixed yet:
+
+- **`cache put` fails on Linux for bundles with NFD file names.** `hash` and
+  `ledger register` compare names in NFC and succeed, but `cache put` reopens
+  each file by its NFC name, which a byte-for-byte filesystem (ext4, the
+  Docker image) cannot find, so it exits 1. macOS (APFS) is not affected.
+- **`ledger verify` checks only the audit chain.** It does not replay the log
+  against the `tasks`, `submissions` and `content_hashes` tables, so a direct
+  SQL `UPDATE` of a task's status or a `DELETE` of a claimed hash is not
+  detected and `verify` still reports ok.
+- **Ledger commands can end in a traceback** instead of an `error:` line when
+  the database is locked past the busy timeout, the `--db` URL does not
+  parse, the Postgres driver is not installed, the file is not a database, or
+  the schema is at a revision this version does not know.
+- **`revise` has no compare-and-set on status.** It checks the status and
+  writes the new content in separate statements. SQLite is safe because every
+  transaction takes the write lock first; on a backend without that (Postgres
+  at READ COMMITTED) a concurrent submit could land in between. Found by
+  reading the code, not reproduced.
 
 ## Roadmap
 
