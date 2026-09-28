@@ -1,10 +1,10 @@
 .DEFAULT_GOAL := help
 UV ?= uv
 
-.PHONY: help install lint format typecheck test cov check demo clean
+.PHONY: help install lint format typecheck test cov check demo docker-build docker-demo clean
 
 help: ## List available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-13s %s\n", $$1, $$2}'
 
 install: ## Create the virtualenv from uv.lock and install git hooks
 	$(UV) sync --frozen
@@ -29,10 +29,17 @@ cov: ## Run tests with branch coverage (fails under 85%)
 
 check: lint typecheck cov ## Everything CI runs
 
-demo: ## End-to-end demo of the CLI on the example bundles
-	$(UV) run taskledger --version
-	$(UV) run taskledger validate examples/bundles/*
-	@for bundle in examples/bundles/*; do $(UV) run taskledger hash $$bundle; done
+IMAGE ?= taskledger:dev
+
+demo: ## End-to-end demo of the CLI on the bundled sample data (offline, seconds)
+	TASKLEDGER="$(UV) run taskledger" EXAMPLES=examples bash scripts/demo.sh
+
+docker-build: ## Build the slim runtime image and prune dangling layers
+	docker build -t $(IMAGE) .
+	docker image prune -f --filter label=project=taskledger
+
+docker-demo: docker-build ## Run the same demo inside the container
+	docker run --rm --entrypoint bash $(IMAGE) /opt/taskledger/scripts/demo.sh
 
 clean: ## Remove caches and build output
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov dist build
