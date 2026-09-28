@@ -169,8 +169,11 @@ and the result fields GitHub code scanning requires (`ruleId`,
 `message.text`, an artifact URI and `region.startLine`). The tests run it
 over real lint output and over hypothesis-generated reports, and delete or
 corrupt each required field of a valid log to prove the check is enforced
-(`tests/test_lint_sarif.py`). In a workflow, keep the upload step running
-when the lint step fails:
+(`tests/test_lint_sarif.py`). CI also uploads the log for the (clean) sample
+bundles to this repository's code scanning on every push to `main`, and
+GitHub processes it without errors; the result objects themselves are covered
+by the checker, since the sample bundles produce none. In a workflow, keep
+the upload step running when the lint step fails:
 
 ```yaml
 - run: uv run taskledger lint --format sarif examples/bundles/* > lint.sarif
@@ -300,12 +303,13 @@ that last updated this table (macOS arm64, Python 3.12, Docker 29).
 
 | Metric | Value | Reproduce with |
 | --- | --- | --- |
-| Tests | 575 passed | `uv run pytest -q` |
-| Branch coverage | 99.39% (gate: 85%) | `make cov` |
+| Tests | 576 passed | `uv run pytest -q` |
+| Branch coverage | 99.43% (gate: 85%) | `make cov` |
 | Lint rules registered | 7 (TL000-TL006) | `uv run taskledger rules` |
 | Findings on the flawed example | 7 (5 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
 | Findings on the two sample bundles | 0 | `uv run taskledger lint examples/bundles/*` |
 | SARIF problems in the flawed example's log | 0 (`[]`; 7 results, 7 rules) | `uv run taskledger lint -f sarif examples/flawed/digit-sum-report \| uv run python -c "import json, sys; from taskledger.lint import sarif_problems; print(sarif_problems(json.load(sys.stdin)))"` |
+| GitHub code scanning upload of the sample bundles' SARIF (CI `sarif` job) | processed: tool `taskledger`, 7 rules, 0 results, no errors or warnings | `gh api repos/vipul21435/taskledger/code-scanning/analyses --jq '.[0] \| {tool: .tool.name, rules_count, results_count, error, warning}'` |
 | `make demo` wall time | 1.50 s | `/usr/bin/time -p make demo` |
 | Docker image | 51 MB compressed, 236 MB unpacked | `make docker-build && docker image ls taskledger:dev` |
 
