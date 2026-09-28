@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 import sys
 from enum import StrEnum
@@ -13,6 +14,7 @@ import typer
 from taskledger import __version__
 from taskledger.bundle import HashError, LoadResult, hash_bundle, load_bundle
 from taskledger.cache import CacheError, ObjectStore, cache_bundle
+from taskledger.ledger import Ledger, LedgerError, ReviewStatus, TaskRecord
 from taskledger.lint import (
     REGISTRY,
     UnknownSelectorError,
@@ -25,7 +27,10 @@ from taskledger.settings import Settings, parse_size
 
 app = typer.Typer(
     name="taskledger",
-    help="Validate, lint and content-hash benchmark task bundles before submission.",
+    help=(
+        "Validate, lint and content-hash benchmark task bundles, dedupe them in a "
+        "content-addressed cache and track them in a shared ledger."
+    ),
     no_args_is_help=True,
     add_completion=False,
 )
@@ -330,3 +335,159 @@ def cache_gc_cmd(
         f"kept {result.kept} object(s), {result.kept_bytes} bytes "
         f"(budget {budget}); {result.stale_tmp_removed} stale temp file(s) removed"
     )
+
+
+ledger_app = typer.Typer(
+    help="Shared ledger: register bundles, detect collisions, move review status, audit.",
+    no_args_is_help=True,
+)
+app.add_typer(ledger_app, name="ledger")
+
+DatabaseUrl = Annotated[
+    str | None,
+    typer.Option(
+        "--db",
+        help="SQLAlchemy URL (default: $TASKLEDGER_DATABASE_URL, else SQLite under "
+        "$TASKLEDGER_HOME).",
+    ),
+]
+Actor = Annotated[
+    str | None,
+    typer.Option("--actor", help="Who is acting, for the audit log (default: $USER)."),
+]
+
+
+def _open_ledger(url: str | None) -> Ledger:
+    ledger = Ledger(url or Settings.from_env().database_url)
+    ledger.migrate()
+    return ledger
+
+
+def _actor(actor: str | None) -> str:
+    if actor:
+        return actor
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):  # pragma: no cover - no passwd entry and no $USER
+        return "unknown"
+
+
+def _task_line(task: TaskRecord) -> str:
+    return f"{task.slug} {task.version}  {task.status}  {task.content_hash}"
+
+
+@ledger_app.command("init")
+def ledger_init_cmd(db: DatabaseUrl = None) -> None:
+    """Create or upgrade the ledger schema (safe to run again)."""
+    with _open_ledger(db) as ledger:
+        typer.echo(f"ledger ready at {ledger.display_url} (schema revision {ledger.revision()})")
+
+
+@ledger_app.command("register")
+def ledger_register_cmd(
+    path: Annotated[Path, typer.Argument(help="Bundle directory to register.")],
+    db: DatabaseUrl = None,
+    actor: Actor = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Register a bundle as a new draft task.
+
+    Exit code 1 on an invalid bundle, an exact collision (same canonical
+    hash) or an ID collision (same ID once case and separators are folded).
+    """
+    result = load_bundle(path)
+    if result.bundle is None:
+        raise _fail(f"{path} is not a valid bundle (run taskledger validate)")
+    try:
+        digest = hash_bundle(result.bundle)
+    except HashError as exc:
+        raise _fail(f"cannot hash {path}: {exc}") from exc
+    manifest = result.bundle.manifest
+    with _open_ledger(db) as ledger:
+        try:
+            task = ledger.register(
+                slug=manifest.task.id,
+                version=manifest.task.version,
+                title=manifest.task.title,
+                content_hash=digest.value,
+                actor=_actor(actor),
+            )
+        except LedgerError as exc:
+            raise _fail(str(exc)) from exc
+    if as_json:
+        typer.echo(json.dumps(task.to_dict(), indent=2))
+    else:
+        typer.echo(f"registered  {_task_line(task)}")
+
+
+@ledger_app.command("status")
+def ledger_status_cmd(
+    slug: Annotated[str, typer.Argument(help="Task ID.")],
+    db: DatabaseUrl = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Show a task's review status, version and content hash."""
+    with _open_ledger(db) as ledger:
+        try:
+            task = ledger.get(slug)
+        except LedgerError as exc:
+            raise _fail(str(exc)) from exc
+    if as_json:
+        typer.echo(json.dumps(task.to_dict(), indent=2))
+    else:
+        typer.echo(_task_line(task))
+
+
+@ledger_app.command("transition")
+def ledger_transition_cmd(
+    slug: Annotated[str, typer.Argument(help="Task ID.")],
+    target: Annotated[ReviewStatus, typer.Argument(help="New review status.")],
+    db: DatabaseUrl = None,
+    actor: Actor = None,
+    note: Annotated[str | None, typer.Option(help="Reason, stored in the audit log.")] = None,
+) -> None:
+    """Move a task to a new review status. Exit code 1 on an illegal transition."""
+    with _open_ledger(db) as ledger:
+        try:
+            before = ledger.get(slug).status
+            task = ledger.transition(slug, target, actor=_actor(actor), note=note)
+        except LedgerError as exc:
+            raise _fail(str(exc)) from exc
+    typer.echo(f"{slug}: {before} -> {task.status}")
+
+
+@ledger_app.command("history")
+def ledger_history_cmd(
+    slug: Annotated[str | None, typer.Argument(help="Task ID (default: the whole log).")] = None,
+    db: DatabaseUrl = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Print audit log rows, oldest first."""
+    with _open_ledger(db) as ledger:
+        rows = ledger.history(slug)
+    if as_json:
+        typer.echo(json.dumps([row.to_dict() for row in rows], indent=2))
+        return
+    for row in rows:
+        typer.echo(
+            f"{row.seq:>4}  {row.at}  {row.actor}  {row.action}  {row.task_slug or '-'}  "
+            f"{row.payload}  {row.row_hash[:12]}"
+        )
+
+
+@ledger_app.command("verify")
+def ledger_verify_cmd(db: DatabaseUrl = None, as_json: JsonFlag = False) -> None:
+    """Recompute the audit hash chain. Exit code 1 if any row was tampered with."""
+    with _open_ledger(db) as ledger:
+        report = ledger.verify_chain()
+    if as_json:
+        typer.echo(json.dumps(report.to_dict(), indent=2))
+    elif report.ok:
+        typer.echo(f"audit chain ok: {report.entries} entries, head {report.head}")
+    else:
+        typer.echo(
+            f"audit chain BROKEN at seq {report.first_bad_seq}: {report.reason} "
+            f"({report.entries} entries verified before it)"
+        )
+    if not report.ok:
+        raise typer.Exit(code=1)
