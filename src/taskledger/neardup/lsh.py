@@ -9,6 +9,7 @@ picks the band/row split that minimizes the weighted area of false positives
 
 from __future__ import annotations
 
+import functools
 import hashlib
 from collections import defaultdict
 from collections.abc import Sequence
@@ -47,6 +48,7 @@ def false_negative_area(threshold: float, bands: int, rows: int) -> float:
     return _integrate(bands, rows, threshold, 1.0, miss=True)
 
 
+@functools.cache
 def optimal_params(
     threshold: float,
     num_perm: int,

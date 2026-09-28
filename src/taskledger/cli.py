@@ -12,9 +12,9 @@ from typing import Annotated, Any
 import typer
 
 from taskledger import __version__
-from taskledger.bundle import HashError, LoadResult, hash_bundle, load_bundle
+from taskledger.bundle import Bundle, HashError, LoadResult, hash_bundle, load_bundle
 from taskledger.cache import CacheError, ObjectStore, cache_bundle
-from taskledger.ledger import Ledger, LedgerError, ReviewStatus, TaskRecord
+from taskledger.ledger import Ledger, LedgerError, ReviewStatus, TaskRecord, fold_id
 from taskledger.lint import (
     REGISTRY,
     UnknownSelectorError,
@@ -23,7 +23,7 @@ from taskledger.lint import (
     format_text,
     lint_paths,
 )
-from taskledger.neardup import DEFAULT_THRESHOLD, NearDupIndex, fingerprint_bundle
+from taskledger.neardup import DEFAULT_THRESHOLD, MinHasher, NearDupIndex, fingerprint_bundle
 from taskledger.settings import Settings, parse_size
 
 app = typer.Typer(
@@ -441,7 +441,15 @@ def ledger_init_cmd(db: DatabaseUrl = None) -> None:
         typer.echo(f"ledger ready at {ledger.display_url} (schema revision {ledger.revision()})")
 
 
-def _ledger_write(path: Path, db: str | None, actor: str | None, *, revise: bool) -> TaskRecord:
+Threshold = Annotated[
+    float,
+    typer.Option(
+        min=0.01, max=0.99, help="Similarity at or above which a task is a near-duplicate."
+    ),
+]
+
+
+def _load_for_ledger(path: Path) -> tuple[Bundle, str]:
     result = load_bundle(path)
     if result.bundle is None:
         raise _fail(f"{path} is not a valid bundle (run taskledger validate)")
@@ -449,16 +457,41 @@ def _ledger_write(path: Path, db: str | None, actor: str | None, *, revise: bool
         digest = hash_bundle(result.bundle)
     except HashError as exc:
         raise _fail(f"cannot hash {path}: {exc}") from exc
-    task = result.bundle.manifest.task
+    return result.bundle, digest.value
+
+
+def _ledger_write(
+    path: Path,
+    db: str | None,
+    actor: str | None,
+    *,
+    revise: bool,
+    threshold: float = DEFAULT_THRESHOLD,
+    allow_near_dup: bool = False,
+) -> TaskRecord:
+    bundle, content_hash = _load_for_ledger(path)
+    task = bundle.manifest.task
+    fingerprint = fingerprint_bundle(bundle, MinHasher())
     with _open_ledger(db) as ledger:
-        write = ledger.revise if revise else ledger.register
         try:
-            return write(
+            if revise:
+                return ledger.revise(
+                    slug=task.id,
+                    version=task.version,
+                    title=task.title,
+                    content_hash=content_hash,
+                    actor=_actor(actor),
+                    fingerprint=fingerprint,
+                )
+            return ledger.register(
                 slug=task.id,
                 version=task.version,
                 title=task.title,
-                content_hash=digest.value,
+                content_hash=content_hash,
                 actor=_actor(actor),
+                fingerprint=fingerprint,
+                threshold=threshold,
+                allow_near_dup=allow_near_dup,
             )
         except LedgerError as exc:
             raise _fail(str(exc)) from exc
@@ -467,20 +500,86 @@ def _ledger_write(path: Path, db: str | None, actor: str | None, *, revise: bool
 @ledger_app.command("register")
 def ledger_register_cmd(
     path: Annotated[Path, typer.Argument(help="Bundle directory to register.")],
+    *,
     db: DatabaseUrl = None,
     actor: Actor = None,
+    threshold: Threshold = DEFAULT_THRESHOLD,
+    allow_near_dup: Annotated[
+        bool,
+        typer.Option(
+            "--allow-near-dup",
+            help="Register even if a near-duplicate exists; the matches are audited.",
+        ),
+    ] = False,
     as_json: JsonFlag = False,
 ) -> None:
     """Register a bundle as a new draft task.
 
     Exit code 1 on an invalid bundle, an exact collision (same canonical
-    hash) or an ID collision (same ID once case and separators are folded).
+    hash), an ID collision (same ID once case and separators are folded) or a
+    near-duplicate at or above --threshold (unless --allow-near-dup).
     """
-    task = _ledger_write(path, db, actor, revise=False)
+    task = _ledger_write(
+        path, db, actor, revise=False, threshold=threshold, allow_near_dup=allow_near_dup
+    )
     if as_json:
         typer.echo(json.dumps(task.to_dict(), indent=2))
     else:
         typer.echo(f"registered  {_task_line(task)}")
+
+
+@ledger_app.command("check")
+def ledger_check_cmd(
+    path: Annotated[Path, typer.Argument(help="Bundle directory to check.")],
+    db: DatabaseUrl = None,
+    threshold: Threshold = DEFAULT_THRESHOLD,
+    as_json: JsonFlag = False,
+) -> None:
+    """Report exact, ID and near-duplicate collisions without registering.
+
+    Exit code 1 if any collision is found or the bundle is invalid.
+    """
+    bundle, content_hash = _load_for_ledger(path)
+    slug = bundle.manifest.task.id
+    with _open_ledger(db) as ledger:
+        exact = ledger.find_by_hash(content_hash)
+        id_owner = ledger.find_by_id_key(fold_id(slug))
+        near = ledger.near_duplicates(fingerprint_bundle(bundle, MinHasher()), threshold=threshold)
+    report: dict[str, Any] = {
+        "path": str(path),
+        "id": slug,
+        "content_hash": content_hash,
+        "threshold": threshold,
+        "exact": None if exact is None else exact.slug,
+        "id_collision": None if id_owner is None else id_owner.slug,
+        "near_duplicates": [
+            {
+                "slug": match.key,
+                "similarity": round(match.similarity, 4),
+                "instruction_similarity": round(match.instruction_similarity, 4),
+                "solution_similarity": round(match.solution_similarity, 4),
+            }
+            for match in near
+        ],
+    }
+    collided = bool(exact or id_owner or near)
+    if as_json:
+        typer.echo(json.dumps(report, indent=2))
+    else:
+        if exact is not None:
+            typer.echo(f"exact     {exact.slug}  (same canonical hash {content_hash})")
+        if id_owner is not None:
+            typer.echo(f"id        {id_owner.slug}  (folds to the same ID as '{slug}')")
+        for item in report["near_duplicates"]:
+            typer.echo(
+                f"near-dup  {item['slug']}  {item['similarity']:.2f}  "
+                f"(instruction {item['instruction_similarity']:.2f}, "
+                f"solution {item['solution_similarity']:.2f})"
+            )
+        if not collided:
+            typer.echo(f"clear     {path}  (no exact, ID or near-duplicate collision)")
+    if collided:
+        raise typer.Exit(code=1)
 
 
 @ledger_app.command("revise")

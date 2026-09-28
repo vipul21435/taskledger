@@ -1,6 +1,6 @@
 """SQLAlchemy 2.0 models of the shared ledger.
 
-The Alembic baseline in ``migrations/versions`` creates exactly this schema
+The Alembic revisions in ``migrations/versions`` create exactly this schema
 (a test compares the two), plus the triggers that make ``audit_log``
 append-only.
 """
@@ -70,6 +70,30 @@ class ContentHash(Base):
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
     submission_id: Mapped[int] = mapped_column(ForeignKey("submissions.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TaskSignature(Base):
+    """MinHash signatures of one submission, as space-separated integers."""
+
+    __tablename__ = "task_signatures"
+    __table_args__ = (UniqueConstraint("submission_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+    submission_id: Mapped[int] = mapped_column(ForeignKey("submissions.id"))
+    instruction: Mapped[str] = mapped_column(Text)
+    solution: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class LshBucket(Base):
+    """One LSH band bucket of a task; candidate lookup is an indexed query."""
+
+    __tablename__ = "lsh_buckets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bucket: Mapped[str] = mapped_column(String(48), index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
 
 
 class AuditEntry(Base):

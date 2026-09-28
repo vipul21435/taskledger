@@ -33,7 +33,7 @@ def test_init_is_idempotent(db: str) -> None:
         code, out, _ = run("ledger", "init", "--db", db)
         assert code == 0
         assert out.startswith("ledger ready at sqlite:///")
-        assert out.rstrip().endswith("(schema revision 0001)")
+        assert out.rstrip().endswith("(schema revision 0002)")
 
 
 def test_init_uses_taskledger_home_by_default(
@@ -118,7 +118,9 @@ def test_register_collisions_transitions_history_and_verify(db: str, tmp_path: P
 def test_verify_reports_tampering(db: str, make_bundle: BundleFactory) -> None:
     for index in range(3):
         manifest = MINIMAL_MANIFEST.replace('"sum-of-squares"', f'"sum-of-squares-{index}"')
-        assert run("ledger", "register", "--db", db, str(make_bundle(manifest=manifest)))[0] == 0
+        bundle = str(make_bundle(manifest=manifest))
+        # Same instruction and solution under three IDs: near-duplicates by design.
+        assert run("ledger", "register", "--db", db, "--allow-near-dup", bundle)[0] == 0
     engine = sa.create_engine(db)
     with engine.begin() as conn:
         conn.execute(sa.text("DROP TRIGGER audit_log_no_update"))

@@ -20,17 +20,36 @@ from typing import Any, Final, cast
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Engine, create_engine, event, select, update
+from sqlalchemy import Engine, create_engine, delete, event, select, update
 from sqlalchemy.engine import CursorResult, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from taskledger.ledger.audit import ChainReport, new_entry, verify_chain
-from taskledger.ledger.models import AuditEntry, ContentHash, Submission, Task
+from taskledger.ledger.models import (
+    AuditEntry,
+    ContentHash,
+    LshBucket,
+    Submission,
+    Task,
+    TaskSignature,
+)
 from taskledger.ledger.states import LedgerError, ReviewStatus, check_transition
+from taskledger.neardup import (
+    DEFAULT_THRESHOLD,
+    Fingerprint,
+    LSHIndex,
+    NearDuplicate,
+    Signature,
+    estimate,
+)
+from taskledger.neardup.minhash import DEFAULT_NUM_PERM
 
 MIGRATIONS_DIR: Final = Path(__file__).with_name("migrations")
-HEAD_REVISION: Final = "0001"
+HEAD_REVISION: Final = "0002"
+#: The ledger's LSH buckets are cut for this threshold; queries at any other
+#: threshold reuse them and confirm candidates with the signature estimate.
+BUCKET_THRESHOLD: Final = DEFAULT_THRESHOLD
 _SEPARATORS = re.compile(r"[\s_.\-]+")
 _WRITE_ATTEMPTS: Final = 5
 #: States in which a task's content may be replaced by a revision.
@@ -61,6 +80,22 @@ class IdCollisionError(LedgerError):
         super().__init__(
             f"ID collision: {slug!r} folds to {id_key!r}, already used by {same} "
             "with different content"
+        )
+
+
+class NearDuplicateError(LedgerError):
+    """The submission is too similar to registered tasks (see ``matches``)."""
+
+    def __init__(self, slug: str, matches: list[NearDuplicate], threshold: float) -> None:
+        self.slug = slug
+        self.matches = matches
+        self.threshold = threshold
+        best = matches[0]
+        super().__init__(
+            f"near-duplicate: '{slug}' is {best.similarity:.2f} similar to '{best.key}' "
+            f"(instruction {best.instruction_similarity:.2f}, solution "
+            f"{best.solution_similarity:.2f}; threshold {threshold}); "
+            f"{len(matches)} match(es) in total. Pass allow_near_dup to register anyway."
         )
 
 
@@ -151,6 +186,14 @@ class AuditRecord:
             "payload": self.payload,
             "row_hash": self.row_hash,
         }
+
+
+def _encode(signature: Signature) -> str:
+    return " ".join(map(str, signature))
+
+
+def _decode(text: str) -> Signature:
+    return tuple(int(value) for value in text.split())
 
 
 def _aware(value: datetime) -> datetime:
@@ -281,7 +324,74 @@ class Ledger:
         if other is not None:
             raise IdCollisionError(slug, other, key)
 
+    @staticmethod
+    def _bucket_keys(fingerprint: Fingerprint) -> list[str]:
+        index = LSHIndex(BUCKET_THRESHOLD, DEFAULT_NUM_PERM)
+        return [f"i:{key}" for key in index.band_keys(fingerprint.instruction)] + [
+            f"s:{key}" for key in index.band_keys(fingerprint.solution)
+        ]
+
+    def _store_fingerprint(
+        self, session: Session, task: Task, submission: Submission, fingerprint: Fingerprint
+    ) -> None:
+        session.add(
+            TaskSignature(
+                task_id=task.id,
+                submission_id=submission.id,
+                instruction=_encode(fingerprint.instruction),
+                solution=_encode(fingerprint.solution),
+                created_at=submission.created_at,
+            )
+        )
+        session.execute(delete(LshBucket).where(LshBucket.task_id == task.id))
+        session.add_all(
+            LshBucket(bucket=key, task_id=task.id) for key in self._bucket_keys(fingerprint)
+        )
+
     # -- queries -----------------------------------------------------------------
+
+    def near_duplicates(
+        self,
+        fingerprint: Fingerprint,
+        *,
+        threshold: float = DEFAULT_THRESHOLD,
+        exclude_slug: str | None = None,
+    ) -> list[NearDuplicate]:
+        """Registered tasks whose latest signatures reach ``threshold``, most similar first.
+
+        Candidates are the tasks sharing an LSH bucket (one indexed query);
+        each is confirmed against the signatures of its latest submission.
+        """
+        with self._sessions() as session:
+            task_ids = set(
+                session.scalars(
+                    select(LshBucket.task_id).where(
+                        LshBucket.bucket.in_(self._bucket_keys(fingerprint))
+                    )
+                )
+            )
+            found = []
+            for task_id in sorted(task_ids):
+                row = session.execute(
+                    select(Task.slug, TaskSignature.instruction, TaskSignature.solution)
+                    .join(TaskSignature, TaskSignature.task_id == Task.id)
+                    .where(Task.id == task_id)
+                    .order_by(TaskSignature.submission_id.desc())
+                    .limit(1)
+                ).one()
+                if row.slug == exclude_slug:
+                    continue
+                match = NearDuplicate(
+                    row.slug,
+                    estimate(fingerprint.instruction, _decode(row.instruction)),
+                    estimate(fingerprint.solution, _decode(row.solution)),
+                )
+                if match.similarity >= threshold:
+                    found.append(match)
+        return sorted(
+            found,
+            key=lambda m: (-m.similarity, -m.instruction_similarity - m.solution_similarity, m.key),
+        )
 
     def get(self, slug: str) -> TaskRecord:
         """The task with ``slug``."""
@@ -296,6 +406,12 @@ class Ledger:
                 .join(ContentHash, ContentHash.task_id == Task.id)
                 .where(ContentHash.hash == content_hash)
             )
+            return None if task is None else TaskRecord.of(task)
+
+    def find_by_id_key(self, id_key: str) -> TaskRecord | None:
+        """The task whose folded ID is ``id_key``, if any."""
+        with self._sessions() as session:
+            task = session.scalar(select(Task).where(Task.id_key == id_key))
             return None if task is None else TaskRecord.of(task)
 
     def history(self, slug: str | None = None) -> list[AuditRecord]:
@@ -325,13 +441,45 @@ class Ledger:
     # -- writes ------------------------------------------------------------------
 
     def register(
-        self, *, slug: str, version: str, title: str, content_hash: str, actor: str
+        self,
+        *,
+        slug: str,
+        version: str,
+        title: str,
+        content_hash: str,
+        actor: str,
+        fingerprint: Fingerprint | None = None,
+        threshold: float = DEFAULT_THRESHOLD,
+        allow_near_dup: bool = False,
     ) -> TaskRecord:
         """Register a new task in ``draft``.
 
         Raises :class:`ExactCollisionError` if the content hash is already in
         the ledger and :class:`IdCollisionError` if the folded slug is taken.
+        With a ``fingerprint``, its signatures are stored for later checks and
+        :class:`NearDuplicateError` is raised when a registered task reaches
+        ``threshold``, unless ``allow_near_dup`` is set; an allowed
+        registration lists the matches in its audit entry.
         """
+        near: list[NearDuplicate] = []
+        if fingerprint is not None:
+            near = self.near_duplicates(fingerprint, threshold=threshold)
+            if near and not allow_near_dup:
+                with self._sessions() as session:
+                    self._raise_collision(session, content_hash, slug)
+                raise NearDuplicateError(slug, near, threshold)
+        extra: dict[str, object] = {}
+        if near:
+            extra["near_duplicates_allowed"] = [
+                {
+                    "slug": match.key,
+                    "similarity": round(match.similarity, 4),
+                    "instruction_similarity": round(match.instruction_similarity, 4),
+                    "solution_similarity": round(match.solution_similarity, 4),
+                }
+                for match in near
+            ]
+            extra["threshold"] = threshold
         for attempt in range(_WRITE_ATTEMPTS):
             with self._sessions() as session:
                 self._raise_collision(session, content_hash, slug)
@@ -366,6 +514,8 @@ class Ledger:
                             created_at=now,
                         )
                     )
+                    if fingerprint is not None:
+                        self._store_fingerprint(session, task, submission, fingerprint)
                     self._audit(
                         session,
                         at=now,
@@ -376,6 +526,7 @@ class Ledger:
                             "version": version,
                             "content_hash": content_hash,
                             "status": ReviewStatus.DRAFT.value,
+                            **extra,
                         },
                     )
                     session.commit()
@@ -392,7 +543,14 @@ class Ledger:
         raise AssertionError("unreachable")  # pragma: no cover
 
     def revise(
-        self, *, slug: str, version: str, title: str, content_hash: str, actor: str
+        self,
+        *,
+        slug: str,
+        version: str,
+        title: str,
+        content_hash: str,
+        actor: str,
+        fingerprint: Fingerprint | None = None,
     ) -> TaskRecord:
         """Record new content for a task in ``draft`` or ``needs_changes``.
 
@@ -430,6 +588,8 @@ class Ledger:
                             created_at=now,
                         )
                     )
+                    if fingerprint is not None:
+                        self._store_fingerprint(session, task, submission, fingerprint)
                     self._audit(
                         session,
                         at=now,
