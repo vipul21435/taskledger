@@ -34,7 +34,7 @@ from taskledger import __version__
 from taskledger.lint.engine import LintReport
 from taskledger.lint.finding import Finding
 from taskledger.lint.formats import display_path
-from taskledger.lint.registry import Rule
+from taskledger.lint.registry import REGISTRY, Rule
 
 SARIF_VERSION: Final = "2.1.0"
 SARIF_SCHEMA: Final = "https://json.schemastore.org/sarif-2.1.0.json"
@@ -106,9 +106,10 @@ def _fingerprint(uri: str, finding: Finding) -> str:
 
 def _result(report: LintReport, finding: Finding, index: Mapping[str, int]) -> dict[str, Any]:
     location = artifact_location(display_path(report.path, finding.file))
+    rule_index = {"ruleIndex": index[finding.code]} if finding.code in index else {}
     return {
         "ruleId": finding.code,
-        "ruleIndex": index[finding.code],
+        **rule_index,
         "level": finding.severity.value,
         "message": {"text": finding.message},
         "locations": [
@@ -124,6 +125,10 @@ def build_sarif(reports: Sequence[LintReport]) -> dict[str, Any]:
     for report in reports:
         for rule in report.rules:
             rules.setdefault(rule.code, rule)
+    for report in reports:  # a hand-built report may omit rules its findings use
+        for finding in report.findings:
+            if finding.code not in rules and finding.code in REGISTRY:
+                rules[finding.code] = REGISTRY.get(finding.code)
     ordered = [rules[code] for code in sorted(rules)]
     index = {rule.code: position for position, rule in enumerate(ordered)}
     results = [_result(report, finding, index) for report in reports for finding in report.findings]

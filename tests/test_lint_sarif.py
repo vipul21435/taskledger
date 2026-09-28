@@ -183,6 +183,21 @@ def test_empty_input_is_still_a_valid_log() -> None:
     assert sarif_problems(document) == []
 
 
+def test_rules_missing_from_a_report_are_filled_in_or_left_unindexed() -> None:
+    unknown = Finding(
+        code="TL999", rule="future-rule", severity=Severity.NOTE, message="m", file="a.py"
+    )
+    report = LintReport("b", True, (finding("TL004", "a.py"), unknown), ())
+    document = build_sarif([report])
+    run = run_of(document)
+    assert [rule["id"] for rule in run["tool"]["driver"]["rules"]] == ["TL004"]
+    first, second = run["results"]
+    assert (first["ruleId"], first["ruleIndex"]) == ("TL004", 0)
+    assert second["ruleId"] == "TL999"
+    assert "ruleIndex" not in second
+    assert sarif_problems(document) == []
+
+
 def test_format_sarif_is_indented_stable_json() -> None:
     text = format_sarif([REPORT])
     assert text.endswith("}\n")
