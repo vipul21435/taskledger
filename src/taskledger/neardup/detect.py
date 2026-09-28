@@ -129,5 +129,18 @@ class NearDupIndex:
             key=lambda m: (-m.similarity, -m.instruction_similarity - m.solution_similarity, m.key),
         )
 
+    @property
+    def bands(self) -> int:
+        """LSH bands chosen for the threshold."""
+        return self._instruction.bands
+
+    @property
+    def rows(self) -> int:
+        """Signature rows per LSH band."""
+        return self._instruction.rows
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._fingerprints
+
     def __len__(self) -> int:
         return len(self._fingerprints)

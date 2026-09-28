@@ -23,6 +23,7 @@ from taskledger.lint import (
     format_text,
     lint_paths,
 )
+from taskledger.neardup import DEFAULT_THRESHOLD, NearDupIndex, fingerprint_bundle
 from taskledger.settings import Settings, parse_size
 
 app = typer.Typer(
@@ -134,6 +135,63 @@ def hash_cmd(
         typer.echo(json.dumps(record, indent=2))
     else:
         typer.echo(f"{digest.value}  {path}")
+
+
+@app.command("similar")
+def similar_cmd(
+    paths: Annotated[list[Path], typer.Argument(help="Bundle directories to compare.")],
+    threshold: Annotated[
+        float,
+        typer.Option(
+            min=0.01, max=0.99, help="Similarity at or above which two bundles are near-duplicates."
+        ),
+    ] = DEFAULT_THRESHOLD,
+    as_json: JsonFlag = False,
+) -> None:
+    """Report near-duplicate pairs among bundles (MinHash + LSH).
+
+    Each bundle is fingerprinted from its instruction's word shingles and its
+    solution's normalized code tokens (identifiers renamed, comments dropped).
+    A pair is reported when either similarity reaches the threshold. Exit code
+    1 if any pair is reported or a bundle is invalid.
+    """
+    index = NearDupIndex(threshold=threshold)
+    pairs: list[dict[str, Any]] = []
+    invalid = False
+    for path in paths:
+        result = load_bundle(path)
+        if result.bundle is None:
+            typer.echo(f"invalid  {path}  ({len(result.issues)} issue(s))", err=True)
+            invalid = True
+            continue
+        key = str(path)
+        fingerprint = fingerprint_bundle(result.bundle, index.hasher)
+        for match in index.find(fingerprint):
+            pairs.append(
+                {
+                    "a": match.key,
+                    "b": key,
+                    "similarity": round(match.similarity, 4),
+                    "instruction_similarity": round(match.instruction_similarity, 4),
+                    "solution_similarity": round(match.solution_similarity, 4),
+                }
+            )
+        if key not in index:
+            index.add(key, fingerprint)
+    if as_json:
+        report = {"threshold": threshold, "bands": index.bands, "rows": index.rows, "pairs": pairs}
+        typer.echo(json.dumps(report, indent=2))
+    elif pairs:
+        for pair in pairs:
+            typer.echo(
+                f"near-dup  {pair['similarity']:.2f}  {pair['a']}  {pair['b']}  "
+                f"(instruction {pair['instruction_similarity']:.2f}, "
+                f"solution {pair['solution_similarity']:.2f})"
+            )
+    else:
+        typer.echo(f"No near-duplicates among {len(index)} bundle(s) at threshold {threshold}.")
+    if pairs or invalid:
+        raise typer.Exit(code=1)
 
 
 class LintFormat(StrEnum):
