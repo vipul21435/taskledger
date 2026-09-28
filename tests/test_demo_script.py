@@ -32,6 +32,7 @@ def test_demo_script_passes() -> None:
     out = result.stdout
     assert "Found 7 findings (5 errors, 2 warnings) in 1 of 1 bundle." in out
     assert "(exit code 1, as expected)" in out
+    assert "wrote 7 SARIF results (" in out
     assert "(identical: a resubmission with only cosmetic edits is a duplicate)" in out
     assert "(different: this is new content)" in out
     assert out.rstrip().endswith("==> Demo finished")

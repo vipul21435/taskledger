@@ -11,6 +11,7 @@ from taskledger.lint.registry import (
     UnknownSelectorError,
     rule,
 )
+from taskledger.lint.sarif import build_sarif, format_sarif, sarif_problems
 
 __all__ = [
     "REGISTRY",
@@ -23,9 +24,12 @@ __all__ = [
     "UnknownSelectorError",
     "Violation",
     "build_context",
+    "build_sarif",
     "format_json",
+    "format_sarif",
     "format_text",
     "lint_bundle",
     "lint_paths",
     "rule",
+    "sarif_problems",
 ]

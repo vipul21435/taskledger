@@ -37,10 +37,21 @@ set -e
 [ "$status" -eq 1 ] || fail "lint of the flawed bundle exited $status, expected 1"
 echo "(exit code $status, as expected)"
 
-step "5. Canonical content hashes of the sample bundles"
+step "5. The same findings as SARIF 2.1.0 for GitHub code scanning"
+sarif="$WORK/lint.sarif"
+set +e
+tl lint --format sarif "$FLAWED" > "$sarif"
+status=$?
+set -e
+[ "$status" -eq 1 ] || fail "SARIF lint of the flawed bundle exited $status, expected 1"
+grep -q '"version": "2.1.0"' "$sarif" || fail "the SARIF log does not declare version 2.1.0"
+results=$(grep -c '"ruleId"' "$sarif")
+echo "wrote $results SARIF results ($(wc -c < "$sarif" | tr -d ' ') bytes) for upload-sarif"
+
+step "6. Canonical content hashes of the sample bundles"
 for bundle in "${GOOD[@]}"; do tl hash "$bundle"; done
 
-step "6. Cosmetic edits keep the hash: CRLF line endings, .DS_Store, new author"
+step "7. Cosmetic edits keep the hash: CRLF line endings, .DS_Store, new author"
 original="${GOOD[0]}"
 copy="$WORK/$(basename "$original")"
 cp -R "$original" "$copy"
@@ -56,7 +67,7 @@ echo "cosmetic: $after"
 [ "$before" = "$after" ] || fail "a cosmetic edit changed the hash"
 echo "(identical: a resubmission with only cosmetic edits is a duplicate)"
 
-step "7. A one-character semantic edit changes the hash"
+step "8. A one-character semantic edit changes the hash"
 printf 'x' >> "$copy/instruction.md"
 changed=$(tl hash "$copy" | cut -d' ' -f1)
 echo "semantic: $changed"

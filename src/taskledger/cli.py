@@ -11,7 +11,14 @@ import typer
 
 from taskledger import __version__
 from taskledger.bundle import HashError, LoadResult, hash_bundle, load_bundle
-from taskledger.lint import REGISTRY, UnknownSelectorError, format_json, format_text, lint_paths
+from taskledger.lint import (
+    REGISTRY,
+    UnknownSelectorError,
+    format_json,
+    format_sarif,
+    format_text,
+    lint_paths,
+)
 
 app = typer.Typer(
     name="taskledger",
@@ -126,6 +133,7 @@ class LintFormat(StrEnum):
 
     TEXT = "text"
     JSON = "json"
+    SARIF = "sarif"
 
 
 def _split_selectors(values: list[str] | None) -> list[str]:
@@ -154,8 +162,9 @@ def lint_cmd(
     """Run the lint rules over bundles.
 
     --select and --ignore are applied after the lint section of each
-    bundle's task.toml. Exit code 1 if any finding is an error, 2 on an
-    unknown rule code.
+    bundle's task.toml. --format sarif writes SARIF 2.1.0 for GitHub code
+    scanning. Exit code 1 if any finding is an error, 2 on an unknown rule
+    code.
     """
     try:
         reports = lint_paths(
@@ -168,6 +177,8 @@ def lint_cmd(
         raise typer.Exit(code=2) from exc
     if output_format is LintFormat.JSON:
         typer.echo(format_json(reports), nl=False)
+    elif output_format is LintFormat.SARIF:
+        typer.echo(format_sarif(reports), nl=False)
     else:
         typer.echo(format_text(reports, hints=hints), nl=False)
     if any(report.has_errors for report in reports):
