@@ -13,9 +13,22 @@ from __future__ import annotations
 import re
 from typing import Final
 
+_LINE_SPLIT_RE: Final = re.compile(r"\r\n|\r|\n")
 _HEADER_RE: Final = re.compile(r"^\s*\[\[?\s*([^\]]*?)\s*\]\]?\s*(?:#.*)?$")
 _KEY_RE: Final = re.compile(r"""^\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*=""")
 _LOC_PART_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def split_lines(text: str) -> list[str]:
+    """Split on CRLF, CR or LF only, like Python's tokenizer and Docker.
+
+    Unlike :meth:`str.splitlines`, form feeds and other Unicode separators do
+    not start a new line, so line numbers agree with ``ast`` positions.
+    """
+    lines = _LINE_SPLIT_RE.split(text)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def loc_parts(loc: str) -> tuple[str, ...]:
@@ -59,7 +72,7 @@ def toml_line(text: str, loc: str | tuple[str, ...]) -> int:
     current = ""
     exact_header: int | None = None
     table_header: int | None = None
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(split_lines(text), start=1):
         header = _header_name(line)
         if header is not None:
             current = header

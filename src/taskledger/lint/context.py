@@ -37,7 +37,7 @@ from taskledger.bundle.manifest import (
     SolutionSpec,
     VerifierSpec,
 )
-from taskledger.lint.locate import toml_line
+from taskledger.lint.locate import split_lines, toml_line
 
 #: Content rules skip files larger than this; TL005 reports them instead.
 MAX_SCAN_BYTES: Final = 4 * 1024 * 1024
@@ -181,7 +181,7 @@ class LintContext:
     def lines(self, relative: str) -> tuple[str, ...]:
         """Lines of a text file without line endings; empty for binary files."""
         text = self.text(relative)
-        return tuple(text.splitlines()) if text is not None else ()
+        return tuple(split_lines(text)) if text is not None else ()
 
     def is_python(self, relative: str) -> bool:
         """``*.py`` files and extension-less files with a python shebang."""

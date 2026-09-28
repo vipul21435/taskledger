@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from hypothesis import settings
 
+from taskledger.lint import Finding, lint_bundle
+
 # "dev" keeps the local loop fast; CI sets HYPOTHESIS_PROFILE=ci for a deeper search.
 settings.register_profile("dev", max_examples=100, deadline=None)
 settings.register_profile("ci", max_examples=400, deadline=None, print_blob=True)
@@ -78,3 +80,19 @@ class BundleFactory:
 @pytest.fixture
 def make_bundle(tmp_path: Path) -> BundleFactory:
     return BundleFactory(tmp_path)
+
+
+def lint_findings(
+    factory: BundleFactory,
+    code: str,
+    files: Mapping[str, str | bytes | None] | None = None,
+    manifest: str = MINIMAL_MANIFEST,
+) -> list[Finding]:
+    """Findings of one rule on a lint-clean bundle with ``files`` overridden."""
+    bundle = factory(manifest=manifest, files={**LINT_CLEAN_FILES, **(files or {})})
+    return list(lint_bundle(bundle, select=[code]).findings)
+
+
+def where(findings: list[Finding]) -> list[tuple[str, int, int]]:
+    """``(file, line, column)`` of each finding."""
+    return [(finding.file, finding.line, finding.column) for finding in findings]
