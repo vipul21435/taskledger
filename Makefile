@@ -29,8 +29,9 @@ cov: ## Run tests with branch coverage (fails under 85%)
 
 check: lint typecheck cov ## Everything CI runs
 
-demo: ## End-to-end demo of the CLI
+demo: ## End-to-end demo of the CLI on the example bundles
 	$(UV) run taskledger --version
+	$(UV) run taskledger validate examples/bundles/*
 
 clean: ## Remove caches and build output
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov dist build

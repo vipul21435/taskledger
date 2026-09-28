@@ -1,0 +1,48 @@
+# Original synthetic example bundle for TaskLedger.
+schema_version = 1
+
+[task]
+id = "integer-linear-system"
+version = "1.0.0"
+title = "Solve a unimodular integer linear system exactly"
+category = "linear-algebra"
+difficulty = "medium"
+tags = ["exact-arithmetic", "json-input", "python"]
+authors = ["Vipul Raj Jha"]
+created_at = 2026-09-29
+notes = "The matrix is a seeded product of elementary integer row operations, so det(A) is +1 or -1."
+
+[instruction]
+path = "instruction.md"
+
+[environment]
+dockerfile = "environment/Dockerfile"
+context = "baseline"
+image = "taskledger/integer-linear-system-env:1.0.0"
+workdir = "/app"
+
+[verifier]
+dockerfile = "verifier/Dockerfile"
+context = "tests"
+image = "taskledger/integer-linear-system-verifier:1.0.0"
+command = ["pytest", "-q", "-p", "no:cacheprovider", "tests"]
+
+[solution]
+path = "solution"
+entrypoint = "solve.sh"
+
+[tests]
+path = "tests"
+
+[baseline]
+path = "baseline"
+
+[timeouts]
+build_sec = 600
+agent_sec = 1200
+verifier_sec = 120
+
+[resources]
+cpus = 1
+memory_mb = 1024
+network = false

@@ -41,8 +41,72 @@ git clone https://github.com/vipul21435/taskledger.git
 cd taskledger
 make install      # uv sync --frozen + pre-commit hooks
 make check        # ruff, mypy --strict, pytest with coverage
-make demo         # smoke-run the CLI (grows into the end-to-end demo)
+make demo         # validate the example bundles (grows into the end-to-end demo)
 ```
+
+## Task bundle format
+
+A task bundle is a directory with a `task.toml` manifest. Every section except
+`[task]` is optional and defaults to the conventional layout below.
+
+```
+modular-inverse-table/
+  task.toml               manifest: id, semver version, images, limits
+  instruction.md          what the agent is asked to do
+  environment/Dockerfile  image the agent works in (digest-pinned base)
+  verifier/Dockerfile     image the grader runs in
+  solution/solve.sh       reference solution that computes the answer
+  tests/                  byte-exact pytest grader
+  baseline/               optional untouched starting workspace
+```
+
+A minimal manifest:
+
+```toml
+schema_version = 1
+
+[task]
+id = "sum-of-squares"        # lowercase slug, 3-64 chars
+version = "1.0.0"            # semantic version
+title = "Sum of squares of a list"
+category = "arithmetic"
+```
+
+The schema is strict: values are never coerced (`version = 1` or
+`verifier_sec = "30"` are errors), unknown keys are rejected, every path must be
+relative and stay inside the bundle (also through symlinks), image references
+follow the registry grammar and timeouts and resources are bounded. The full
+model lives in [`src/taskledger/bundle/manifest.py`](src/taskledger/bundle/manifest.py).
+
+Two original example bundles ship in [`examples/bundles/`](examples/bundles/):
+a modular-inverse table over a composite modulus and a unimodular integer
+linear system (determinant +1 or -1, so exactly one integer answer). Their
+graders recompute every answer independently and pin the input by digest; a
+test runs each grader against the untouched baseline (must fail), the reference
+solution (must pass, twice) and a corrupted output (must fail).
+
+### Validate
+
+`taskledger validate PATH...` reports every problem at once, each with a precise
+location, and exits 1 if any bundle is invalid (`--json` for a machine-readable
+report):
+
+```console
+$ taskledger validate examples/bundles/*
+ok       examples/bundles/integer-linear-system  (integer-linear-system 1.0.0)
+ok       examples/bundles/modular-inverse-table  (modular-inverse-table 1.0.0)
+
+$ taskledger validate broken
+invalid  broken  (4 issue(s))
+  task.toml:task.id: must be a lowercase slug of 3-64 characters (letters, digits and single hyphens), got 'Modular_Inverse'
+  task.toml:task.version: must be a semantic version such as 1.0.0 or 2.1.0-rc.1, got '1.0'
+  task.toml:instruction.path: must stay inside the bundle, got '../instruction.md'
+  task.toml:resources.cpus: Input should be a valid number
+```
+
+Schema errors are reported first; once the manifest is valid, every declared
+path is checked on disk (`file not found`, `expected a directory`,
+`resolves outside the bundle`).
 
 ## Development
 

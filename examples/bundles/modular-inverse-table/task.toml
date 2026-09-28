@@ -1,0 +1,48 @@
+# Original synthetic example bundle for TaskLedger.
+schema_version = 1
+
+[task]
+id = "modular-inverse-table"
+version = "1.0.0"
+title = "Modular inverse table for a composite modulus"
+category = "number-theory"
+difficulty = "easy"
+tags = ["modular-arithmetic", "python", "text-output"]
+authors = ["Vipul Raj Jha"]
+created_at = 2026-09-29
+notes = "Queries were drawn with a fixed seed and include zero, negative and very large values."
+
+[instruction]
+path = "instruction.md"
+
+[environment]
+dockerfile = "environment/Dockerfile"
+context = "baseline"
+image = "taskledger/modular-inverse-table-env:1.0.0"
+workdir = "/app"
+
+[verifier]
+dockerfile = "verifier/Dockerfile"
+context = "tests"
+image = "taskledger/modular-inverse-table-verifier:1.0.0"
+command = ["pytest", "-q", "-p", "no:cacheprovider", "tests"]
+
+[solution]
+path = "solution"
+entrypoint = "solve.sh"
+
+[tests]
+path = "tests"
+
+[baseline]
+path = "baseline"
+
+[timeouts]
+build_sec = 600
+agent_sec = 900
+verifier_sec = 120
+
+[resources]
+cpus = 1
+memory_mb = 1024
+network = false
