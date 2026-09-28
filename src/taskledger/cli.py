@@ -351,7 +351,10 @@ def cache_get_cmd(
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
     else:
-        output.write_bytes(data)
+        try:
+            output.write_bytes(data)
+        except OSError as exc:
+            raise _fail(f"cannot write {output}: {exc}") from exc
 
 
 @cache_app.command("has")

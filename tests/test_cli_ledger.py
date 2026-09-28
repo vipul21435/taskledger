@@ -47,6 +47,19 @@ def test_init_uses_taskledger_home_by_default(
     assert "home/ledger.db" in out
 
 
+def test_init_keeps_percent_and_question_mark_in_taskledger_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TASKLEDGER_DATABASE_URL", raising=False)
+    for name in ("pct%41dir", "q?x"):
+        monkeypatch.setenv("TASKLEDGER_HOME", str(tmp_path / name))
+        code, _, err = run("ledger", "init")
+        assert code == 0, err
+        assert (tmp_path / name / "ledger.db").is_file()
+    assert not (tmp_path / "pctAdir").exists()
+    assert not (tmp_path / "q").exists()
+
+
 def test_register_collisions_transitions_history_and_verify(db: str, tmp_path: Path) -> None:
     bundle = EXAMPLES / "modular-inverse-table"
     code, out, err = run("ledger", "register", "--db", db, "--actor", "alice", str(bundle))

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
 from typer.testing import CliRunner
 
 from conftest import BundleFactory
@@ -91,6 +92,17 @@ def test_settings_from_env(tmp_path: Path) -> None:
     assert custom.database_url == "postgresql+psycopg://x/y"
 
 
+@pytest.mark.parametrize("name", ["pct%41dir", "q?x", "at@sign", "hash#mark", "sp ace"])
+def test_default_ledger_url_keeps_special_characters_in_the_home_path(
+    tmp_path: Path, name: str
+) -> None:
+    home = tmp_path / name
+    url = sa.engine.make_url(Settings.from_env({"TASKLEDGER_HOME": str(home)}).database_url)
+    assert url.drivername == "sqlite"
+    assert url.database == (home / "ledger.db").as_posix()
+    assert not url.query
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -152,6 +164,13 @@ def test_cli_put_get_has_gc_round_trip(make_bundle: BundleFactory, tmp_path: Pat
         == 0
     )
     assert out.read_bytes() == b"plain file\n"
+    unwritable = runner.invoke(
+        app,
+        ["cache", "get", "--cache-dir", str(cas), blob_key, "-o", str(tmp_path / "nodir" / "o")],
+    )
+    assert unwritable.exit_code == 1
+    assert unwritable.exception is None or isinstance(unwritable.exception, SystemExit)
+    assert "error: cannot write " in unwritable.stderr
 
     missing = "sha256:" + "0" * 64
     has = runner.invoke(app, ["cache", "has", "--cache-dir", str(cas), blob_key, missing])

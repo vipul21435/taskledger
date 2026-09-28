@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 _SIZE = re.compile(r"(?P<number>\d+)\s*(?P<unit>[kmgt]?i?b?)?", re.IGNORECASE)
 _UNITS = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
@@ -29,8 +30,17 @@ class Settings:
         """Read ``TASKLEDGER_HOME`` and ``TASKLEDGER_DATABASE_URL``."""
         env = os.environ if environ is None else environ
         home = Path(env.get("TASKLEDGER_HOME") or ".taskledger")
-        url = env.get("TASKLEDGER_DATABASE_URL") or f"sqlite:///{(home / 'ledger.db').as_posix()}"
+        url = env.get("TASKLEDGER_DATABASE_URL") or sqlite_url(home / "ledger.db")
         return cls(home=home, database_url=url)
+
+
+def sqlite_url(path: Path) -> str:
+    """SQLite URL for ``path``, escaped so ``%``, ``?`` and ``@`` stay in the file name.
+
+    SQLAlchemy percent-decodes the database part of a URL and treats ``?`` as
+    the start of the query string, so the path is quoted before it is embedded.
+    """
+    return "sqlite:///" + quote(path.as_posix(), safe="/:~")
 
 
 def parse_size(text: str) -> int:
