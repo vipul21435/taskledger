@@ -174,7 +174,7 @@ when the lint step fails:
 
 ```yaml
 - run: uv run taskledger lint --format sarif examples/bundles/* > lint.sarif
-- uses: github/codeql-action/upload-sarif@v3
+- uses: github/codeql-action/upload-sarif@v4
   if: always()
   with:
     sarif_file: lint.sarif
@@ -416,7 +416,11 @@ reads none of them.
 | `make docker-build` / `make docker-demo` | build the image (and prune dangling layers) / run the demo in it |
 
 CI (`.github/workflows/ci.yml`) runs `make check`'s steps and, in a second
-job, `make demo` plus the same demo inside a freshly built image.
+job, `make demo` plus the same demo inside a freshly built image. A third job,
+on pushes to `main`, lints the sample bundles with `--format sarif`, checks
+the log with `sarif_problems` and uploads it to GitHub code scanning with
+`github/codeql-action/upload-sarif@v4` (`wait-for-processing: true`, so the
+job fails if GitHub cannot process the log).
 
 ## Why this exists
 

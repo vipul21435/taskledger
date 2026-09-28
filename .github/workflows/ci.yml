@@ -75,3 +75,34 @@ jobs:
 
       - name: Run the demo inside the image
         run: docker run --rm --entrypoint bash taskledger:ci /opt/taskledger/scripts/demo.sh
+
+  sarif:
+    name: lint SARIF upload to code scanning
+    # Fork pull requests get a read-only token, so only upload from pushes.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Lint the sample bundles as SARIF 2.1.0
+        run: |
+          uv python install 3.12
+          uv sync --frozen
+          uv run taskledger lint --format sarif examples/bundles/* > lint.sarif
+          uv run python -c "import json, sys; from taskledger.lint import sarif_problems; problems = sarif_problems(json.load(open('lint.sarif'))); print(problems or 'no SARIF problems'); sys.exit(bool(problems))"
+
+      - name: Upload to GitHub code scanning (fails if GitHub cannot process it)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: lint.sarif
+          category: taskledger-lint
+          wait-for-processing: true
