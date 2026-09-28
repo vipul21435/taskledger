@@ -153,3 +153,32 @@ def test_errors(db: str, make_bundle: BundleFactory, tmp_path: Path) -> None:
     assert json.loads(out)["slug"] == "sum-of-squares"
     code, out, _ = run("ledger", "history", "--db", db)
     assert out.count("\n") == 1
+
+
+def test_revise_command(db: str, tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    shutil.copytree(
+        EXAMPLES / "modular-inverse-table", bundle, ignore=shutil.ignore_patterns("__pycache__")
+    )
+    assert run("ledger", "register", "--db", db, str(bundle))[0] == 0
+    code, _, err = run("ledger", "revise", "--db", db, str(bundle))
+    assert code == 1
+    assert "exact collision" in err
+    (bundle / "instruction.md").write_bytes(
+        (bundle / "instruction.md").read_bytes() + b"\nPrint one inverse per line.\n"
+    )
+    code, out, err = run("ledger", "revise", "--db", db, "--actor", "alice", str(bundle))
+    assert code == 0, err
+    assert out.startswith("revised     modular-inverse-table 1.0.0  draft  sha256:")
+    (bundle / "instruction.md").write_bytes(b"A shorter instruction.\n")
+    code, out, _ = run("ledger", "revise", "--db", db, "--json", str(bundle))
+    assert code == 0
+    assert json.loads(out)["status"] == "draft"
+    assert run("ledger", "transition", "--db", db, "modular-inverse-table", "submitted")[0] == 0
+    (bundle / "instruction.md").write_bytes(b"Yet another change.\n")
+    code, _, err = run("ledger", "revise", "--db", db, str(bundle))
+    assert code == 1
+    assert "cannot revise content in status submitted" in err
+    code, out, _ = run("ledger", "history", "--db", db, "--json")
+    actions = [row["action"] for row in json.loads(out)]
+    assert actions == ["register", "revise", "revise", "transition"]

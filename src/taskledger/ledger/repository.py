@@ -33,6 +33,8 @@ MIGRATIONS_DIR: Final = Path(__file__).with_name("migrations")
 HEAD_REVISION: Final = "0001"
 _SEPARATORS = re.compile(r"[\s_.\-]+")
 _WRITE_ATTEMPTS: Final = 5
+#: States in which a task's content may be replaced by a revision.
+REVISABLE_STATES: Final = frozenset({ReviewStatus.DRAFT, ReviewStatus.NEEDS_CHANGES})
 
 
 class ExactCollisionError(LedgerError):
@@ -60,6 +62,16 @@ class IdCollisionError(LedgerError):
             f"ID collision: {slug!r} folds to {id_key!r}, already used by {same} "
             "with different content"
         )
+
+
+class RevisionNotAllowedError(LedgerError):
+    """New content is only accepted while a task is a draft or needs changes."""
+
+    def __init__(self, slug: str, status: ReviewStatus) -> None:
+        self.slug = slug
+        self.status = status
+        allowed = " or ".join(sorted(REVISABLE_STATES))
+        super().__init__(f"{slug}: cannot revise content in status {status} (only in {allowed})")
 
 
 class TaskNotFoundError(LedgerError, KeyError):
@@ -251,14 +263,19 @@ class Ledger:
         session.add(entry)
         return entry
 
-    def _raise_collision(self, session: Session, content_hash: str, slug: str) -> None:
+    @staticmethod
+    def _raise_exact(session: Session, content_hash: str) -> None:
         existing = session.execute(
-            select(Task.slug, Task.version)
+            select(Task.slug, Submission.version)
             .join(ContentHash, ContentHash.task_id == Task.id)
+            .join(Submission, Submission.id == ContentHash.submission_id)
             .where(ContentHash.hash == content_hash)
         ).first()
         if existing is not None:
             raise ExactCollisionError(content_hash, existing.slug, existing.version)
+
+    def _raise_collision(self, session: Session, content_hash: str, slug: str) -> None:
+        self._raise_exact(session, content_hash)
         key = fold_id(slug)
         other = session.scalar(select(Task.slug).where(Task.id_key == key))
         if other is not None:
@@ -368,6 +385,68 @@ class Ledger:
                     # caller would see it, or retry if only the audit head moved.
                     with self._sessions() as fresh:
                         self._raise_collision(fresh, content_hash, slug)
+                    if attempt == _WRITE_ATTEMPTS - 1:
+                        raise
+                    continue
+                return TaskRecord.of(task)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def revise(
+        self, *, slug: str, version: str, title: str, content_hash: str, actor: str
+    ) -> TaskRecord:
+        """Record new content for a task in ``draft`` or ``needs_changes``.
+
+        The status is unchanged (move ``needs_changes -> submitted`` next).
+        Raises :class:`ExactCollisionError` if the content was ever registered,
+        including as an earlier revision of this task, and
+        :class:`RevisionNotAllowedError` in any other status.
+        """
+        for attempt in range(_WRITE_ATTEMPTS):
+            with self._sessions() as session:
+                task = self._task(session, slug)
+                status = ReviewStatus(task.status)
+                if status not in REVISABLE_STATES:
+                    raise RevisionNotAllowedError(slug, status)
+                self._raise_exact(session, content_hash)
+                now = self._now()
+                previous = {"version": task.version, "content_hash": task.content_hash}
+                task.version, task.title = version, title
+                task.content_hash, task.updated_at = content_hash, now
+                try:
+                    submission = Submission(
+                        task_id=task.id,
+                        version=version,
+                        content_hash=content_hash,
+                        submitted_by=actor,
+                        created_at=now,
+                    )
+                    session.add(submission)
+                    session.flush()
+                    session.add(
+                        ContentHash(
+                            hash=content_hash,
+                            task_id=task.id,
+                            submission_id=submission.id,
+                            created_at=now,
+                        )
+                    )
+                    self._audit(
+                        session,
+                        at=now,
+                        actor=actor,
+                        action="revise",
+                        task_slug=slug,
+                        payload={
+                            "version": version,
+                            "content_hash": content_hash,
+                            "previous": previous,
+                        },
+                    )
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    with self._sessions() as fresh:
+                        self._raise_exact(fresh, content_hash)
                     if attempt == _WRITE_ATTEMPTS - 1:
                         raise
                     continue

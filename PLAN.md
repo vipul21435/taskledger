@@ -163,9 +163,11 @@ Goal: Back every claim with a reproducible number and make the repo easy to eval
 - Every ledger CLI command upgrades the schema to the Alembic head first;
   migrations run on the caller's connection (`env.py` refuses to run without
   one), so there is no alembic.ini to keep in sync.
-- Not done in this slice (moved to later slices): revising a task's content
-  after `needs_changes`, a Postgres CI job (slice 8) and the multiprocessing
-  registration race (slice 5).
+- `revise` (not in the original slice text) replaces a task's content while
+  it is `draft` or `needs_changes`; every earlier content hash stays in
+  `content_hashes`, so an old revision can never be registered again.
+- Not done in this slice (moved to later slices): a Postgres CI job (slice 8)
+  and the multiprocessing registration race (slice 5).
 
 ## Status
 

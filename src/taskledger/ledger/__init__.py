@@ -3,10 +3,12 @@
 from taskledger.ledger.audit import GENESIS_HASH, ChainReport, verify_chain
 from taskledger.ledger.repository import (
     HEAD_REVISION,
+    REVISABLE_STATES,
     AuditRecord,
     ExactCollisionError,
     IdCollisionError,
     Ledger,
+    RevisionNotAllowedError,
     TaskNotFoundError,
     TaskRecord,
     create_ledger_engine,
@@ -25,6 +27,7 @@ __all__ = [
     "FINAL_STATES",
     "GENESIS_HASH",
     "HEAD_REVISION",
+    "REVISABLE_STATES",
     "TRANSITIONS",
     "AuditRecord",
     "ChainReport",
@@ -34,6 +37,7 @@ __all__ = [
     "Ledger",
     "LedgerError",
     "ReviewStatus",
+    "RevisionNotAllowedError",
     "TaskNotFoundError",
     "TaskRecord",
     "check_transition",

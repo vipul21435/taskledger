@@ -383,6 +383,29 @@ def ledger_init_cmd(db: DatabaseUrl = None) -> None:
         typer.echo(f"ledger ready at {ledger.display_url} (schema revision {ledger.revision()})")
 
 
+def _ledger_write(path: Path, db: str | None, actor: str | None, *, revise: bool) -> TaskRecord:
+    result = load_bundle(path)
+    if result.bundle is None:
+        raise _fail(f"{path} is not a valid bundle (run taskledger validate)")
+    try:
+        digest = hash_bundle(result.bundle)
+    except HashError as exc:
+        raise _fail(f"cannot hash {path}: {exc}") from exc
+    task = result.bundle.manifest.task
+    with _open_ledger(db) as ledger:
+        write = ledger.revise if revise else ledger.register
+        try:
+            return write(
+                slug=task.id,
+                version=task.version,
+                title=task.title,
+                content_hash=digest.value,
+                actor=_actor(actor),
+            )
+        except LedgerError as exc:
+            raise _fail(str(exc)) from exc
+
+
 @ledger_app.command("register")
 def ledger_register_cmd(
     path: Annotated[Path, typer.Argument(help="Bundle directory to register.")],
@@ -395,29 +418,31 @@ def ledger_register_cmd(
     Exit code 1 on an invalid bundle, an exact collision (same canonical
     hash) or an ID collision (same ID once case and separators are folded).
     """
-    result = load_bundle(path)
-    if result.bundle is None:
-        raise _fail(f"{path} is not a valid bundle (run taskledger validate)")
-    try:
-        digest = hash_bundle(result.bundle)
-    except HashError as exc:
-        raise _fail(f"cannot hash {path}: {exc}") from exc
-    manifest = result.bundle.manifest
-    with _open_ledger(db) as ledger:
-        try:
-            task = ledger.register(
-                slug=manifest.task.id,
-                version=manifest.task.version,
-                title=manifest.task.title,
-                content_hash=digest.value,
-                actor=_actor(actor),
-            )
-        except LedgerError as exc:
-            raise _fail(str(exc)) from exc
+    task = _ledger_write(path, db, actor, revise=False)
     if as_json:
         typer.echo(json.dumps(task.to_dict(), indent=2))
     else:
         typer.echo(f"registered  {_task_line(task)}")
+
+
+@ledger_app.command("revise")
+def ledger_revise_cmd(
+    path: Annotated[Path, typer.Argument(help="Bundle directory with the new content.")],
+    db: DatabaseUrl = None,
+    actor: Actor = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Record new content for a task in draft or needs_changes.
+
+    The status does not change; move needs_changes to submitted next. Exit
+    code 1 in any other status, for an unknown task, or when the content was
+    registered before (including as an earlier revision).
+    """
+    task = _ledger_write(path, db, actor, revise=True)
+    if as_json:
+        typer.echo(json.dumps(task.to_dict(), indent=2))
+    else:
+        typer.echo(f"revised     {_task_line(task)}")
 
 
 @ledger_app.command("status")

@@ -25,6 +25,7 @@ from taskledger.ledger import (
     Ledger,
     LedgerError,
     ReviewStatus,
+    RevisionNotAllowedError,
     TaskNotFoundError,
     check_transition,
     fold_id,
@@ -375,3 +376,108 @@ def test_env_refuses_to_run_without_a_connection() -> None:
     config.set_main_option("script_location", str(repository_module.MIGRATIONS_DIR))
     with pytest.raises(RuntimeError, match=r"Ledger\.migrate"):
         command.upgrade(config, "head")
+
+
+def revise(ledger: Ledger, content_hash: str, version: str = "1.1.0") -> None:
+    ledger.revise(
+        slug="matrix-rank",
+        version=version,
+        title="Rank of an integer matrix, v2",
+        content_hash=content_hash,
+        actor="alice",
+    )
+
+
+def test_revise_after_needs_changes_then_resubmit(ledger: Ledger) -> None:
+    register(ledger)
+    for target in (ReviewStatus.SUBMITTED, ReviewStatus.IN_REVIEW, ReviewStatus.NEEDS_CHANGES):
+        ledger.transition("matrix-rank", target, actor="rev")
+    revise(ledger, H2)
+    task = ledger.get("matrix-rank")
+    assert (task.version, task.content_hash, task.status) == (
+        "1.1.0",
+        H2,
+        ReviewStatus.NEEDS_CHANGES,
+    )
+    assert task.title.endswith("v2")
+    ledger.transition("matrix-rank", ReviewStatus.SUBMITTED, actor="alice")
+    last = ledger.history("matrix-rank")[-2]
+    assert last.action == "revise"
+    assert f'"previous":{{"content_hash":"{H1}","version":"1.0.0"}}' in last.payload
+    # Both contents stay claimed: the old one names the version it was registered as.
+    assert ledger.find_by_hash(H1) == ledger.find_by_hash(H2)
+    with pytest.raises(ExactCollisionError) as info:
+        register(ledger, slug="someone-else", content_hash=H1)
+    assert info.value.existing_version == "1.0.0"
+    assert ledger.verify_chain().ok
+
+
+def test_revise_is_allowed_in_draft_only_otherwise(ledger: Ledger) -> None:
+    register(ledger)
+    revise(ledger, H2)
+    ledger.transition("matrix-rank", ReviewStatus.SUBMITTED, actor="alice")
+    with pytest.raises(RevisionNotAllowedError) as info:
+        revise(ledger, H3)
+    assert info.value.status is ReviewStatus.SUBMITTED
+    assert str(info.value) == (
+        "matrix-rank: cannot revise content in status submitted (only in draft or needs_changes)"
+    )
+    assert ledger.get("matrix-rank").content_hash == H2
+
+
+def test_revise_rejects_known_content_and_unknown_tasks(ledger: Ledger) -> None:
+    register(ledger)
+    register(ledger, slug="gcd-table", content_hash=H2)
+    with pytest.raises(ExactCollisionError, match=r"already registered as matrix-rank 1\.0\.0"):
+        revise(ledger, H1)
+    with pytest.raises(ExactCollisionError, match=r"already registered as gcd-table 1\.0\.0"):
+        revise(ledger, H2)
+    with pytest.raises(TaskNotFoundError):
+        ledger.revise(slug="nope", version="1.0.0", title="t", content_hash=H3, actor="a")
+
+
+def test_revise_race_is_resolved_by_the_unique_constraint(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register(ledger)
+    register(ledger, slug="gcd-table", content_hash=H2)
+    real = Ledger._raise_exact
+    calls: list[str] = []
+
+    def skip_first(session: sa.orm.Session, content_hash: str) -> None:
+        calls.append(content_hash)
+        if len(calls) > 1:
+            real(session, content_hash)
+
+    monkeypatch.setattr(Ledger, "_raise_exact", staticmethod(skip_first))
+    with pytest.raises(ExactCollisionError, match="gcd-table"):
+        revise(ledger, H2)
+    assert len(calls) == 2
+    assert ledger.get("matrix-rank").content_hash == H1
+
+
+def test_revise_retries_and_gives_up_on_audit_conflicts(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register(ledger)
+    real = repository_module.new_entry
+    stale: list[bool] = []
+
+    def stale_once(**kwargs: object) -> object:
+        if not stale:
+            stale.append(True)
+            kwargs["prev"] = None
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(repository_module, "new_entry", stale_once)
+    revise(ledger, H2)
+    assert ledger.get("matrix-rank").content_hash == H2
+
+    def always_stale(**kwargs: object) -> object:
+        kwargs["prev"] = None
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(repository_module, "new_entry", always_stale)
+    with pytest.raises(IntegrityError):
+        revise(ledger, H3, version="1.2.0")
+    assert ledger.get("matrix-rank").content_hash == H2

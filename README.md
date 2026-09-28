@@ -27,7 +27,7 @@ catches those before a reviewer ever sees the task.
 | `taskledger rules` | Lists the registered rules (`--json` for machines). |
 | `taskledger hash PATH` | Canonical Merkle-style sha256 of a bundle: cosmetic edits (line endings, manifest formatting, author metadata, OS clutter) never change it, any semantic edit always does. This is the identity for exact-duplicate detection. |
 | `taskledger cache put\|get\|has\|gc` | Content-addressed object store (dedupe cache): `objects/ab/cdef...` fan-out, atomic temp-file + `os.replace` writes, verify-on-read, size-bounded LRU garbage collection. A bundle is stored file by file under its canonical digests, so an identical or cosmetically different bundle writes nothing. |
-| `taskledger ledger init\|register\|status\|transition\|history\|verify` | Shared ledger on SQLAlchemy 2.0 with an Alembic baseline (SQLite by default; another URL via `--db` or `TASKLEDGER_DATABASE_URL`, with `psycopg` from the optional `postgres` extra for Postgres, which the tests do not exercise yet): exact collisions by canonical hash enforced by a unique constraint, ID collisions with case and separator folding, a review state machine with typed errors, and an append-only, hash-chained audit log with `verify`. |
+| `taskledger ledger init\|register\|revise\|status\|transition\|history\|verify` | Shared ledger on SQLAlchemy 2.0 with an Alembic baseline (SQLite by default; another URL via `--db` or `TASKLEDGER_DATABASE_URL`, with `psycopg` from the optional `postgres` extra for Postgres, which the tests do not exercise yet): exact collisions by canonical hash enforced by a unique constraint, ID collisions with case and separator folding, a review state machine with typed errors, and an append-only, hash-chained audit log with `verify`. |
 
 Lint rules shipped (`taskledger rules`):
 
@@ -339,6 +339,20 @@ $ taskledger ledger verify
 audit chain ok: 4 entries, head 4a7dd8845528dc9b1ab37bf99e11f7a67b4970a51f5ec450675dd2d279304ed4
 ```
 
+`revise` records new content for a task in `draft` or `needs_changes`
+(status unchanged); earlier contents stay claimed, so resubmitting any
+content the ledger has seen, including an older revision of the same task,
+is an exact collision:
+
+```console
+$ taskledger ledger revise --actor alice edited
+revised     modular-inverse-table 1.0.0  needs_changes  sha256:0b5d3bfe98cf220eb8b66d9064191822b5f424f37faaa3376dc4ba49fe662b25
+$ taskledger ledger transition --actor alice modular-inverse-table submitted
+modular-inverse-table: needs_changes -> submitted
+$ taskledger ledger revise --actor alice edited
+error: modular-inverse-table: cannot revise content in status submitted (only in draft or needs_changes)
+```
+
 The audit log is append-only in the database and tamper-evident outside it.
 Triggers refuse `UPDATE` and `DELETE`; each row stores the previous row's
 hash and its own sha256 over canonical JSON of every column, so a row edited
@@ -355,7 +369,8 @@ audit chain BROKEN at seq 2: row content does not match its hash (row edited) (1
 
 Deleting the newest rows leaves a valid prefix, so compare `verify`'s head
 with one recorded earlier to detect truncation. All commands take `--json`
-where they print records (`register`, `status`, `history`, `verify`).
+where they print records (`register`, `revise`, `status`, `history`,
+`verify`).
 
 ## Architecture
 
@@ -385,7 +400,7 @@ flowchart LR
     end
 
     subgraph ledger["ledger/"]
-        Repo["repository.py<br/>register, transition, history"]
+        Repo["repository.py<br/>register, revise, transition, history"]
         States["states.py<br/>review state machine"]
         Audit["audit.py<br/>hash chain, verify_chain"]
         Models["models.py + migrations/<br/>SQLAlchemy 2.0, Alembic baseline"]
@@ -427,8 +442,8 @@ that last updated this table (macOS arm64, Python 3.12, Docker 29).
 
 | Metric | Value | Reproduce with |
 | --- | --- | --- |
-| Tests | 649 passed | `uv run pytest -q` |
-| Branch coverage | 98.32% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
+| Tests | 655 passed | `uv run pytest -q` |
+| Branch coverage | 98.34% (gate: 85%; the Alembic scripts are exercised by the migration tests but loaded by Alembic's own importer, so coverage reports them as unexecuted) | `make cov` |
 | Lint rules registered | 7 (TL000-TL006) | `uv run taskledger rules` |
 | Findings on the flawed example | 7 (5 errors, 2 warnings), exit 1 | `uv run taskledger lint examples/flawed/digit-sum-report` |
 | Findings on the two sample bundles | 0 | `uv run taskledger lint examples/bundles/*` |
@@ -533,8 +548,8 @@ Not built yet; tracked slice by slice in [PLAN.md](PLAN.md).
 
 - **Ledger follow-ups:** a CI job against a real Postgres service container
   (the baseline creates Postgres triggers for the audit log, but only SQLite
-  is exercised by the tests today), revising a task's content after
-  `needs_changes`, and a multiprocessing registration race test (slice 5).
+  is exercised by the tests today) and a multiprocessing registration race
+  test (slice 5).
 - **Near-duplicate detection:** pure-Python MinHash + LSH over instruction
   shingles and normalized solution tokens.
 - **Build locks:** `fcntl` file locks, DB leases with fencing tokens and stale
