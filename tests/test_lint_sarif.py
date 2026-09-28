@@ -403,3 +403,61 @@ def test_any_report_renders_to_a_valid_log(found: list[Finding], path: str) -> N
     document = json.loads(format_sarif([report]))
     assert sarif_problems(document) == []
     assert len(run_of(document)["results"]) == len(found)
+
+
+def _minimal_log(run: dict[str, Any]) -> dict[str, Any]:
+    return {"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "x"}}, **run}]}
+
+
+@pytest.mark.parametrize(
+    ("document", "where"),
+    [
+        (_minimal_log({"columnKind": [], "results": []}), "$.runs[0].columnKind"),
+        (
+            _minimal_log(
+                {
+                    "results": [
+                        {
+                            "ruleId": "A",
+                            "level": {"x": 1},
+                            "message": {"text": "m"},
+                            "locations": [
+                                {
+                                    "physicalLocation": {
+                                        "artifactLocation": {"uri": "a"},
+                                        "region": {"startLine": 1},
+                                    }
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            "$.runs[0].results[0].level",
+        ),
+        (
+            {
+                "version": "2.1.0",
+                "runs": [
+                    {
+                        "tool": {
+                            "driver": {
+                                "name": "x",
+                                "rules": [
+                                    {"id": "A", "defaultConfiguration": {"level": ["error"]}}
+                                ],
+                            }
+                        },
+                        "results": [],
+                    }
+                ],
+            },
+            "rules[0].defaultConfiguration.level",
+        ),
+    ],
+)
+def test_unhashable_enum_values_are_reported_not_raised(
+    document: dict[str, Any], where: str
+) -> None:
+    problems = sarif_problems(document)
+    assert any(where in problem and "must be one of" in problem for problem in problems), problems

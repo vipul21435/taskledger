@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import random
 import string
+import time
 from pathlib import Path
 from typing import Any
 
@@ -345,3 +346,78 @@ def test_generic_findings_never_echo_the_value(value: str) -> None:
     for match in find_secrets(f'api_key = "{value}"'):
         assert value not in match.message
         assert value[:4] not in match.message.split("secret: ")[-1]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "ACGT" * 50_000,  # a genome fixture on one line
+        rand(200_000, ALNUM + "-_", seed=3),  # base64url blob
+        "a." * 200_000,  # dotted run (URL scheme pattern)
+        "a-" * 100_000,
+        "a:" * 100_000,
+        "a://" * 50_000,
+        "k: " + "a " * 100_000,  # annotation look-ahead
+    ],
+    ids=["dna", "base64url", "dots", "dashes", "colons", "schemes", "annotation"],
+)
+def test_long_token_like_lines_scan_in_linear_time(line: str) -> None:
+    # These took minutes to hours when the name group could start anywhere
+    # inside a run; a linear scan finishes in well under a second.
+    start = time.perf_counter()
+    assert find_secrets(line) == []
+    assert time.perf_counter() - start < 2.0
+
+
+def test_one_line_genome_file_lints_quickly(make_bundle: BundleFactory) -> None:
+    bundle = make_bundle(files={**LINT_CLEAN_FILES, "tests/genome.txt": "ACGT" * 12_500 + "\n"})
+    start = time.perf_counter()
+    report = lint_bundle(bundle, select=["TL006"])
+    assert report.findings == ()
+    assert time.perf_counter() - start < 2.0
+
+
+SUBSCRIPT_VALUE = rand(24, seed=21)
+URL_PASSWORD = rand(18, seed=22)
+DOTENV_VALUE = "Xk9#mP2$qL7@vN4!wR8t"
+
+
+@pytest.mark.parametrize(
+    ("line", "secret"),
+    [
+        (f'os.environ["API_KEY"] = "{SUBSCRIPT_VALUE}"', SUBSCRIPT_VALUE),
+        (f"settings['secret_key'] = '{SUBSCRIPT_VALUE}'", SUBSCRIPT_VALUE),
+        (f"config[token] = {SUBSCRIPT_VALUE}", SUBSCRIPT_VALUE),
+        (f'REDIS_URL = "redis://:{URL_PASSWORD}@redis:6379/0"', URL_PASSWORD),
+        (f"amqp://:{URL_PASSWORD}@broker", URL_PASSWORD),
+        (f"DB_PASSWORD={DOTENV_VALUE}", DOTENV_VALUE),
+        (f"--api-key={SUBSCRIPT_VALUE}", SUBSCRIPT_VALUE),
+    ],
+    ids=[
+        "environ-subscript",
+        "dict-subscript",
+        "bare-subscript",
+        "redis",
+        "amqp",
+        "dotenv",
+        "flag",
+    ],
+)
+def test_subscripts_empty_usernames_and_special_characters_are_caught(
+    line: str, secret: str
+) -> None:
+    matches = find_secrets(line)
+    assert [line[m.start : m.end] for m in matches] == [secret]
+    assert all(secret not in m.message for m in matches)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'DOCS = "https://api.host:8443?email=me@x.org"',
+        'DOCS = "https://api.host:8443#contact@x.org"',
+        "token=$GITHUB_TOKEN_FROM_THE_ENVIRONMENT",
+    ],
+)
+def test_query_strings_fragments_and_env_references_are_not_secrets(line: str) -> None:
+    assert find_secrets(line) == []

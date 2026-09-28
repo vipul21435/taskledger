@@ -205,7 +205,7 @@ class _Checker:
             self.report(where, f"must be an integer >= {minimum}")
 
     def enum(self, value: object, where: str, allowed: frozenset[str]) -> None:
-        if value not in allowed:
+        if not isinstance(value, str) or value not in allowed:
             self.report(where, f"must be one of {', '.join(sorted(allowed))}, got {value!r}")
 
     def text(self, parent: Mapping[str, Any], key: str, where: str) -> None:

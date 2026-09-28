@@ -44,7 +44,7 @@ KEPT_PREFIX: Final = 4
 _HEX_RE: Final = re.compile(r"[0-9a-fA-F]+")
 _PLACEHOLDER_RE: Final = re.compile(
     r"example|placeholder|changeme|change[_-]me|dummy|fake|sample|redacted|"
-    r"your[_-]|xxxx|\*\*\*\*|\.\.\.|\$\{|\$\(|\{\{|%\(|<[^>]*>",
+    r"your[_-]|xxxx|\*\*\*\*|\.\.\.|\$\{|\$\(|\{\{|%\(|<[^>]*>|^\$[A-Za-z_][A-Za-z0-9_]*$",
     re.IGNORECASE,
 )
 _SECRET_NAME_RE: Final = re.compile(
@@ -57,12 +57,16 @@ _NOT_A_SECRET_NAME_RE: Final = re.compile(
     r"limit|max|min|type|field|header|prefix|kind)s?$|^(?:max|min|num|n)[_.-]",
     re.IGNORECASE,
 )
+#: The name must start a token (no match can begin inside a longer run of
+#: name characters) so that ``finditer`` stays linear on long token-like lines
+#: such as DNA, hex or base64 fixtures. Leading dashes (``--api-key=``) and a
+#: closing quote or subscript bracket (``os.environ["API_KEY"] =``) are allowed.
 _ASSIGNMENT_RE: Final = re.compile(
-    r"""(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)["']?"""
+    r"""(?<![A-Za-z0-9_.-])-*(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)(?:["']?\])?["']?"""
     r"""(?:\s*:\s*[A-Za-z_][A-Za-z0-9_.\[\], |]*?(?=\s*=[^=]))?"""  # annotation
     r"""\s*(?::=|=>|[:=])\s*"""
     r"""(?:[rRbBuU]{0,2}(?P<quote>["'`])(?P<quoted>[^"'`\s]+)(?P=quote)"""
-    r"""|(?P<bare>[A-Za-z0-9+/=_.~-]+))"""
+    r"""|(?P<bare>[A-Za-z0-9+/=_.~!@#$%^&*-]+))"""
 )
 
 
@@ -118,7 +122,7 @@ KNOWN_FORMATS: Final = (
     ),
     _format(
         "password in URL",
-        r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@'\"]+:(?P<secret>[^\s/@'\"]+)@",
+        r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@'\"?#]*:(?P<secret>[^\s/@'\"?#]+)@",
     ),
 )
 
